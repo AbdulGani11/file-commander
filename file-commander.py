@@ -319,7 +319,7 @@ class Trie:
         Find all files matching a prefix (like autocomplete).
 
         Returns unique files to avoid duplicates from multiple word matches.
-        Essential for responsive search as users type partial movie names.
+        Essential for responsive search as users type partial names.
         """
         node = self.root
         for char in prefix.lower():

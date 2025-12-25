@@ -1,6 +1,27 @@
-# Ignore Python bytecode caches
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Ignore virtual environment
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+
+# Unit Test / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
 venv/
+env/
+.env
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Operating System
+.DS_Store
+Thumbs.db

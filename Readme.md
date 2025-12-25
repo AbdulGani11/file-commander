@@ -1,22 +1,20 @@
-# Readme
-## File Navigator
+# File Commander
 
 **Python 3.10+** | **License: MIT**
 
-Smart file operations made simple. File Navigator is an interactive CLI tool that helps users efficiently find, create, and manage files with intelligent search capabilities and confidence-based matching.
+Smart file operations made simple. File Commander is an interactive CLI tool that helps users efficiently find, create, and manage files with intelligent search capabilities and confidence-based matching.
 
 ## ✨ Features
 
 - **📁 Create Files & Folders** - Create new folders and files with nested structures
 - **⚡ Search & Manage Files/Folders** - Lightning-fast search with open and rename operations
-- **🎬 Play Movie/Video** - Smart movie finder with confidence-based matching
 - **📋 List Directory Contents** - Browse and explore folder contents with filtering
 - **⚙️ Search Statistics** - View search index status and performance metrics
 
 ### Core Capabilities
 
 - **Intelligent Search Engine**: Multi-strategy search using Trie data structure for instant results
-- **Confidence-Based Matching**: Prevents false matches (finds "The Intern", ignores "The Secret Life...")
+- **Confidence-Based Matching**: Prevents false matches with relevance scoring
 - **Incremental Indexing**: Progressive folder scanning with early termination for optimal performance
 - **Continuous Search**: Search multiple times without re-indexing overhead
 - **Secure Operations**: Path validation and input sanitization to prevent security vulnerabilities
@@ -33,9 +31,9 @@ Smart file operations made simple. File Navigator is an interactive CLI tool tha
 1. **Clone this repository:**
 
 ```bash
-git clone https://github.com/yourusername/file-navigator.git
-cd file-navigator
-````
+git clone https://github.com/yourusername/file-commander.git
+cd file-commander
+```
 
 2. **Create a virtual environment (recommended):**
 
@@ -53,35 +51,27 @@ pip install -r requirements.txt
 
 ## 🖥 Usage
 
-Start File Navigator with:
+Start File Commander with:
 
 ```bash
-python file-navigator.py
+python file-commander.py
 ```
 
 ### Interactive Menu
 
-⚡ File Navigator
+⚡ File Commander
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 Choose an Operation
 
-| Option | Description                     |
-| ------ | ------------------------------- |
-| 1      | 📁 Create Files & Folders       |
+| Option | Description                      |
+| ------ | -------------------------------- |
+| 1      | 📁 Create Files & Folders        |
 | 2      | ⚡ Search & Manage Files/Folders |
-| 3      | 🎬 Play Movie/Video             |
-| 4      | 📋 List Directory Contents      |
-| 5      | ⚙️ Search Statistics            |
-| 6      | ❌ Exit                          |
+| 3      | 📋 List Directory Contents       |
+| 4      | ⚙️ Search Statistics             |
+| 0      | ❌ Exit                          |
 
 ### Key Features in Action
-
-**🎬 Smart Movie Search:**
-
-- Searches prioritized movie folders (Videos, Movies, etc.)
-- Uses confidence scoring to find exact matches
-- Ignores false positives (won't confuse "The Intern" with "The Secret Life of Walter Mitty")
-- Plays movies instantly when found
 
 **⚡ Continuous File Search:**
 
@@ -102,7 +92,7 @@ python file-navigator.py
 
 - **Trie Data Structure**: Fast prefix matching for autocomplete-style search
 - **Multi-Strategy Search**: Exact match, prefix, word-based, and substring algorithms
-- **Confidence Scoring**: 0-100% matching algorithm prevents false positives
+- **Relevance Scoring**: Results sorted by match quality and location
 - **Incremental Indexing**: Process folders progressively with early termination
 
 ### Security Features
@@ -113,22 +103,21 @@ python file-navigator.py
 
 ### Performance Optimizations
 
-- **Early Termination**: Stops searching when high-confidence matches found
+- **Smart Drive Indexing**: C: drive indexes user folders only; other drives index completely
 - **Priority-Based Scanning**: Checks likely locations first
 - **Memory-Efficient Indexing**: Smart caching without memory bloat
 - **Zero Re-indexing**: Continuous search without performance penalties
 
-## 🎯 Why Choose File Navigator?
+## 🎯 Why Choose File Commander?
 
 ### Speed & Efficiency
 
-- **Instant Movie Discovery**: Find and play movies in seconds
 - **Progressive Search**: No waiting for complete system indexing
 - **Continuous Workflows**: Multiple operations without restarting
 
 ### Smart & Reliable
 
-- **Confidence-Based Matching**: Finds the right files, not similar ones
+- **Relevance-Based Matching**: Finds the right files with smart scoring
 - **Security-First Design**: Input validation prevents common vulnerabilities
 - **Professional Interface**: Rich terminal UI with clear visual feedback
 
@@ -139,13 +128,12 @@ python file-navigator.py
 - **Helpful Feedback**: Clear success/error messages with visual indicators
 - **Undo Support**: Immediate undo for rename operations
 
-File Navigator bridges the gap between simple file browsers and complex command-line tools, offering powerful search capabilities in an accessible, menu-driven interface.
+File Commander bridges the gap between simple file browsers and complex command-line tools, offering powerful search capabilities in an accessible, menu-driven interface.
 
 ## 📦 Dependencies
 
 ```txt
-typer>=0.16.0    # CLI framework
-rich>=14.0.0     # Terminal UI
+rich>=14.0.0     # Terminal UI (prompts, tables, panels)
 ```
 
 ## 🛠 Troubleshooting
@@ -161,6 +149,4 @@ This project is open-source and available under the MIT License.
 
 ## 🙏 Acknowledgements
 
-- **Typer** for the elegant command-line interface framework
-- **Rich** for beautiful terminal output and interactive components
-
+- **Rich** for beautiful terminal output, interactive prompts, and elegant components

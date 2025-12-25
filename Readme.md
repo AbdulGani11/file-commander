@@ -5,19 +5,19 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-**Smart operations made simple.** A high-performance, offline CLI tool designed for **Windows** that helps you manage files with sub-second search speeds and a professional terminal interface.
+**Smart operations made simple.** A fast, offline tool for Windows that helps you find and manage files instantly. It runs in your terminal but looks and feels like a professional app.
 
 ---
 
 ## 🚀 Key Features
 
-*   **⚡ Instant Search**: Uses **Trie Data Structures** (Prefix Trees) for O(L) lookup speed. Finds files instantly even in massive directories.
-*   **🎨 Professional UI**: Built with `Rich` for a modern, centering layout with gradients, icons, and responsive tables.
-*   **🛡️ Security-First**: Input sanitization and path traversal protection prevent accidental filesystem damage.
-*   **🧠 Smart Caching**: Indexes folders once and caches the result in memory for continuous, lag-free operations.
-*   **🧪 Battle-Tested**: 100% unit test coverage with automated CI/CD pipelines on GitHub Actions.
+*   **⚡ Instant Search**: Finds files immediately, no matter how many you have. It uses advanced **Trie technology** (Prefix Trees) to search as fast as you type.
+*   **🎨 Modern Design**: A clean, easy-to-read interface with colors, icons, and tables. No messy text blocks.
+*   **🛡️ Safe & Secure**: Automatically blocks unsafe file names to protect your computer from errors.
+*   **🧠 Smart Memory**: Scans your folders once and remembers them. You can search again and again without waiting.
+*   **🧪 Reliable**: Tested automatically on every change to ensure it never breaks.
 
-## �️ Installation
+## 🛠️ Installation
 
 1.  **Clone the repository:**
     ```bash
@@ -39,40 +39,37 @@
 
 ## 🖥️ Usage
 
-Run the application:
+Run the app:
 ```bash
 python file-commander.py
 ```
 
-### 📋 Interactive Menu
-The application features a keyboard-driven menu system:
-1.  **📁 Create**: Generate files and tailored folder structures.
-2.  **⚡ Search**: Smart fuzzy-search for files (supports opening and renaming).
-3.  **📋 List**: Browse directories with ease.
-4.  **⚙️ Stats**: View indexing performance and memory usage.
+### 📋 What can it do?
+The menu is controlled by your keyboard:
+1.  **📁 Create**: Make new files and folders easily.
+2.  **⚡ Search**: Find any file instantly (you can open or rename them too).
+3.  **📋 List**: See what is inside your folders.
+4.  **⚙️ Stats**: Check how many files are indexed and memory usage.
 
 ## 🧪 Development & Testing
 
-This project adheres to professional engineering standards.
+This project is built with high standards.
 
-**Run Unit Tests:**
+**Run Tests:**
 ```bash
-# Run the full test suite
+# Check if everything works
 pytest
-
-# Run with coverage report
-pytest --cov=file-commander
 ```
 
-**Continuous Integration:**
-Every push triggers a GitHub Actions workflow that runs tests across Python 3.10, 3.11, and 3.12 to ensure cross-platform compatibility.
+**Auto-Checks (CI):**
+Every time we update the code, GitHub automatically runs tests on Python 3.10, 3.11, and 3.12 to make sure it works for everyone.
 
-## � Technical Architecture
+## 🔧 Technical Details (For Developers)
 
-*   **Core**: Python 3.10+ (Type Hinted)
-*   **Algorithms**: Prefix Trie, Depth-First Search (DFS)
-*   **UI Framework**: Rich (Textual formatting)
-*   **Testing**: Pytest, GitHub Actions
+*   **Language**: Python 3.10+ (with Type Hints)
+*   **Data Structure**: Prefix Trie & DFS
+*   **UI Library**: Rich
+*   **Testing**: Pytest & GitHub Actions
 
 ## 📜 License
 

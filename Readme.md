@@ -1,10 +1,11 @@
 # ⚡ File Commander
 
 [![CI](https://github.com/AbdulGani11/file-commander/actions/workflows/ci.yml/badge.svg)](https://github.com/AbdulGani11/file-commander/actions)
+![Platform Windows](https://img.shields.io/badge/platform-Windows-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-**Smart operations made simple.** A high-performance, offline CLI tool that helps you manage files with sub-second search speeds and a professional terminal interface.
+**Smart operations made simple.** A high-performance, offline CLI tool designed for **Windows** that helps you manage files with sub-second search speeds and a professional terminal interface.
 
 ---
 

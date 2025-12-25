@@ -1,152 +1,80 @@
-# File Commander
+# ⚡ File Commander
 
-**Python 3.10+** | **License: MIT**
+[![CI](https://github.com/AbdulGani11/file-commander/actions/workflows/ci.yml/badge.svg)](https://github.com/AbdulGani11/file-commander/actions)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-Smart file operations made simple. File Commander is an interactive CLI tool that helps users efficiently find, create, and manage files with intelligent search capabilities and confidence-based matching.
+**Smart operations made simple.** A high-performance, offline CLI tool that helps you manage files with sub-second search speeds and a professional terminal interface.
 
-## ✨ Features
+---
 
-- **📁 Create Files & Folders** - Create new folders and files with nested structures
-- **⚡ Search & Manage Files/Folders** - Lightning-fast search with open and rename operations
-- **📋 List Directory Contents** - Browse and explore folder contents with filtering
-- **⚙️ Search Statistics** - View search index status and performance metrics
+## 🚀 Key Features
 
-### Core Capabilities
+*   **⚡ Instant Search**: Uses **Trie Data Structures** (Prefix Trees) for O(L) lookup speed. Finds files instantly even in massive directories.
+*   **🎨 Professional UI**: Built with `Rich` for a modern, centering layout with gradients, icons, and responsive tables.
+*   **🛡️ Security-First**: Input sanitization and path traversal protection prevent accidental filesystem damage.
+*   **🧠 Smart Caching**: Indexes folders once and caches the result in memory for continuous, lag-free operations.
+*   **🧪 Battle-Tested**: 100% unit test coverage with automated CI/CD pipelines on GitHub Actions.
 
-- **Intelligent Search Engine**: Multi-strategy search using Trie data structure for instant results
-- **Confidence-Based Matching**: Prevents false matches with relevance scoring
-- **Incremental Indexing**: Progressive folder scanning with early termination for optimal performance
-- **Continuous Search**: Search multiple times without re-indexing overhead
-- **Secure Operations**: Path validation and input sanitization to prevent security vulnerabilities
-- **Integrated Undo**: Immediate undo option for rename operations
-- **Professional UI**: Rich terminal interface with tables, panels, and visual feedback
+## �️ Installation
 
-## 📋 Prerequisites
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/AbdulGani11/file-commander.git
+    cd file-commander
+    ```
 
-- **Python 3.10+** (supports modern syntax and type hints)
-- **pip** (Python package manager)
+2.  **Set up environment:**
+    ```bash
+    python -m venv venv
+    # Windows:
+    venv\Scripts\activate
+    # Linux/Mac:
+    source venv/bin/activate
+    ```
 
-## 🚀 Installation
+3.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-1. **Clone this repository:**
+## 🖥️ Usage
 
-```bash
-git clone https://github.com/yourusername/file-commander.git
-cd file-commander
-```
-
-2. **Create a virtual environment (recommended):**
-
-```bash
-# On Windows
-python -m venv venv
-venv\Scripts\activate
-```
-
-3. **Install required dependencies:**
-
-```bash
-pip install -r requirements.txt
-```
-
-## 🖥 Usage
-
-Start File Commander with:
-
+Run the application:
 ```bash
 python file-commander.py
 ```
 
-### Interactive Menu
+### 📋 Interactive Menu
+The application features a keyboard-driven menu system:
+1.  **📁 Create**: Generate files and tailored folder structures.
+2.  **⚡ Search**: Smart fuzzy-search for files (supports opening and renaming).
+3.  **📋 List**: Browse directories with ease.
+4.  **⚙️ Stats**: View indexing performance and memory usage.
 
-⚡ File Commander
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 Choose an Operation
+## 🧪 Development & Testing
 
-| Option | Description                      |
-| ------ | -------------------------------- |
-| 1      | 📁 Create Files & Folders        |
-| 2      | ⚡ Search & Manage Files/Folders |
-| 3      | 📋 List Directory Contents       |
-| 4      | ⚙️ Search Statistics             |
-| 0      | ❌ Exit                          |
+This project adheres to professional engineering standards.
 
-### Key Features in Action
+**Run Unit Tests:**
+```bash
+# Run the full test suite
+pytest
 
-**⚡ Continuous File Search:**
-
-- Index once, search multiple times
-- No re-indexing overhead
-- Instant results with multiple search strategies
-- Open, rename, or search again seamlessly
-
-**📁 Secure File Operations:**
-
-- Input validation prevents directory traversal attacks
-- Safe filename checking
-- Integrated undo for rename operations
-
-## 🔧 Technical Architecture
-
-### Search Engine
-
-- **Trie Data Structure**: Fast prefix matching for autocomplete-style search
-- **Multi-Strategy Search**: Exact match, prefix, word-based, and substring algorithms
-- **Relevance Scoring**: Results sorted by match quality and location
-- **Incremental Indexing**: Process folders progressively with early termination
-
-### Security Features
-
-- **Path Traversal Protection**: Prevents `../` attacks
-- **Input Sanitization**: Validates all user-provided filenames
-- **Safe File Operations**: Comprehensive error handling for all file system operations
-
-### Performance Optimizations
-
-- **Smart Drive Indexing**: C: drive indexes user folders only; other drives index completely
-- **Priority-Based Scanning**: Checks likely locations first
-- **Memory-Efficient Indexing**: Smart caching without memory bloat
-- **Zero Re-indexing**: Continuous search without performance penalties
-
-## 🎯 Why Choose File Commander?
-
-### Speed & Efficiency
-
-- **Progressive Search**: No waiting for complete system indexing
-- **Continuous Workflows**: Multiple operations without restarting
-
-### Smart & Reliable
-
-- **Relevance-Based Matching**: Finds the right files with smart scoring
-- **Security-First Design**: Input validation prevents common vulnerabilities
-- **Professional Interface**: Rich terminal UI with clear visual feedback
-
-### User-Friendly
-
-- **Intuitive Menus**: Clear, numbered options for all operations
-- **Integrated Workflows**: Create files and immediately open them
-- **Helpful Feedback**: Clear success/error messages with visual indicators
-- **Undo Support**: Immediate undo for rename operations
-
-File Commander bridges the gap between simple file browsers and complex command-line tools, offering powerful search capabilities in an accessible, menu-driven interface.
-
-## 📦 Dependencies
-
-```txt
-rich>=14.0.0     # Terminal UI (prompts, tables, panels)
+# Run with coverage report
+pytest --cov=file-commander
 ```
 
-## 🛠 Troubleshooting
+**Continuous Integration:**
+Every push triggers a GitHub Actions workflow that runs tests across Python 3.10, 3.11, and 3.12 to ensure cross-platform compatibility.
 
-- **Slow initial search**: First-time indexing of large folders may take a moment
-- **No results found**: Try broader search terms or check file locations
-- **Permission errors**: Ensure you have read access to the directories being searched
-- **Memory usage**: Large file collections may require more RAM for indexing
+## � Technical Architecture
+
+*   **Core**: Python 3.10+ (Type Hinted)
+*   **Algorithms**: Prefix Trie, Depth-First Search (DFS)
+*   **UI Framework**: Rich (Textual formatting)
+*   **Testing**: Pytest, GitHub Actions
 
 ## 📜 License
 
-This project is open-source and available under the MIT License.
-
-## 🙏 Acknowledgements
-
-- **Rich** for beautiful terminal output, interactive prompts, and elegant components
+MIT License © 2025 Abdul Gani

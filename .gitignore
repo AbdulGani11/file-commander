@@ -4,13 +4,16 @@ __pycache__/
 
 # Testing
 .pytest_cache/
+.coverage
+htmlcov/
 
 # Virtual Environment
 venv/
 .env
 
-# Documentation (personal reference)
-Documentation.md
+# Working documentation (personal reference - not committed)
+# Readme.md is the only doc that ships with the repo.
+docs/
 
 # VS Code (workspace settings - keep local)
 .vscode/

@@ -7,7 +7,11 @@ Built for Windows.
 """
 
 import os
+import json
 import time
+import sqlite3
+import queue
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -19,22 +23,56 @@ from rich.text import Text
 from rich.prompt import Prompt, Confirm
 from rich import box
 
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler as _FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
+    _FileSystemEventHandler = object  # Fallback base class when watchdog not installed
+
+try:
+    from rapidfuzz import process as rf_process, fuzz as rf_fuzz
+    RAPIDFUZZ_AVAILABLE = True
+except ImportError:
+    RAPIDFUZZ_AVAILABLE = False
+    rf_process = None
+    rf_fuzz = None
+
 # Initialize Rich console for beautiful terminal output
 console = Console()
 
 
 # CONSTANTS - Centralized configuration for easy maintenance
 
-# System directories to skip during indexing (improves performance and security)
+# Directories to skip during indexing (improves performance and security).
+# Matched per path segment, so a name at any depth prunes the whole subtree.
 SKIP_DIRECTORIES = {
+    # Operating system
     "system32",
     "windows",
     "programdata",
     "$recycle",
     "appdata",
+
+    # Version control and editor state
     ".git",
+    ".claude",
+    ".idea",
+    ".vs",
+
+    # Python virtual environments ("site-packages" catches any env name)
+    "venv",
+    ".venv",
+    "site-packages",
+
+    # Dependency and build caches
     "node_modules",
     "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
 }
 
 # Search configuration constants
@@ -47,6 +85,19 @@ DISPLAY_RESULTS_LIMIT = 20  # Maximum results to display in table
 SCORE_EXACT_MATCH = 100  # Query exactly matches filename
 SCORE_STARTS_WITH = 80   # Filename starts with query (autocomplete-style)
 SCORE_CONTAINS = 50      # Filename contains query somewhere
+
+# Persistent index cache
+CACHE_DB_PATH = Path.home() / ".filefind_cache.db"
+CACHE_SCHEMA_VERSION = 2  # Bump when the schema OR what gets indexed changes
+
+# Usage-adaptive scoring
+HISTORY_PATH = Path.home() / ".filefind_history.json"
+ACCESS_SCORE_WEIGHT = 5   # Points added per recorded open (e.g. opened 3 times = +15)
+ACCESS_SCORE_MAX = 40     # Cap so a heavily-used file doesn't bury everything else
+
+# Fuzzy matching (Strategy 5)
+FUZZY_SCORE_CUTOFF = 75   # Minimum rapidfuzz WRatio score to accept a fuzzy match (0–100)
+FUZZY_MIN_RESULTS = 5     # Only run fuzzy pass when strategies 1–4 return fewer than this
 
 
 
@@ -224,6 +275,27 @@ class UIUtils:
 
 
 
+# FILE SYSTEM WATCHER - Real-time index delta updates
+
+
+class IndexEventHandler(_FileSystemEventHandler):
+    """Pushes filesystem events onto a queue for the dedicated writer thread.
+    Callbacks return immediately — all index work happens off the watcher thread."""
+
+    def __init__(self, event_queue: queue.Queue):
+        self._queue = event_queue
+
+    def on_created(self, event):
+        self._queue.put(("insert", Path(event.src_path), None))
+
+    def on_deleted(self, event):
+        self._queue.put(("delete", Path(event.src_path), None))
+
+    def on_moved(self, event):
+        self._queue.put(("move", Path(event.src_path), Path(event.dest_path)))
+
+
+
 # SEARCH ENGINE - Fast file indexing and retrieval system
 
 
@@ -294,10 +366,27 @@ class FileSearchIndex:
         # Statistics for user feedback
         self.total_items = 0
 
+        # Usage-adaptive scoring: path string -> open count
+        self.access_counts = FileSearchIndex._load_access_counts()
+
     @staticmethod
     def _tokenize(text: str) -> List[str]:
         """Split text into searchable words on dots, underscores, and dashes."""
         return text.replace(".", " ").replace("_", " ").replace("-", " ").split()
+
+    @staticmethod
+    def _acronym(filename: str) -> Optional[str]:
+        """Initials of a multi-word filename, ignoring the extension.
+
+        "quarterly_business_review.docx" -> "qbr", so typing "qbr" finds it.
+        """
+        stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+        words = FileSearchIndex._tokenize(stem)
+
+        if len(words) < 2:
+            # A single word has no acronym worth storing
+            return None
+        return "".join(word[0] for word in words if word)
 
     def add_file(self, file_path: Path):
         """Index file/folder in Trie, exact_match, and word_index. Skips duplicates."""
@@ -324,6 +413,12 @@ class FileSearchIndex:
                 if len(word) > MIN_WORD_LENGTH:  # Skip very short words (the, of, a, etc.)
                     self.word_index[word].add(file_path)
 
+            # 4. Add initials as a token; the Trie copy lets "qb" match too
+            acronym = FileSearchIndex._acronym(filename)
+            if acronym:
+                self.word_index[acronym].add(file_path)
+                self.trie.insert(acronym, file_path)
+
             # Track this file as indexed
             self.indexed_paths.add(str(file_path).lower())
             self.total_items += 1
@@ -331,6 +426,68 @@ class FileSearchIndex:
         except (OSError, PermissionError):
             # Skip files we can't access (common in system directories)
             pass
+
+    def remove_file(self, file_path: Path):
+        """Remove file from exact_match, word_index, and indexed_paths.
+        Trie does not support deletion; stale trie entries are filtered in search()."""
+        path_key = str(file_path).lower()
+        if path_key not in self.indexed_paths:
+            return
+
+        filename = file_path.name.lower()
+        self.indexed_paths.discard(path_key)
+        self.total_items = max(0, self.total_items - 1)
+
+        if filename in self.exact_match:
+            self.exact_match[filename] = [
+                m for m in self.exact_match[filename]
+                if str(m.path).lower() != path_key
+            ]
+            if not self.exact_match[filename]:
+                del self.exact_match[filename]
+
+        words = FileSearchIndex._tokenize(filename)
+        acronym = FileSearchIndex._acronym(filename)
+        evict = [w for w in words if len(w) > MIN_WORD_LENGTH]
+        if acronym:
+            evict.append(acronym)
+
+        for word in evict:
+            if word in self.word_index:
+                self.word_index[word].discard(file_path)
+                if not self.word_index[word]:
+                    del self.word_index[word]
+
+    @staticmethod
+    def _load_access_counts() -> dict:
+        """Load open-count history from JSON. Returns empty dict on any failure."""
+        if HISTORY_PATH.exists():
+            try:
+                with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
+
+    def record_access(self, file_path: Path):
+        """Increment the open count for a file and persist to disk."""
+        key = str(file_path)
+        self.access_counts[key] = self.access_counts.get(key, 0) + 1
+        try:
+            with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.access_counts, f)
+        except OSError:
+            pass  # History loss is acceptable; never crash on a write failure
+
+    def suggest_correction(self, query: str) -> Optional[str]:
+        """Return the closest filename in the index to query, or None if no good match."""
+        if not RAPIDFUZZ_AVAILABLE or not self.exact_match:
+            return None
+        candidates = list(self.exact_match.keys())
+        match = rf_process.extractOne(
+            query, candidates, scorer=rf_fuzz.WRatio, score_cutoff=60
+        )
+        return match[0] if match else None
 
     def index_folder(self, folder_path: Path) -> int:
         """Recursively index all files/folders in directory. Returns count of items indexed."""
@@ -347,8 +504,9 @@ class FileSearchIndex:
                 if item.is_symlink():
                     continue
 
-                # Skip system directories for performance and security
-                if PathUtils.should_skip_directory(item.parent):
+                # Check the item, not its parent, so the excluded folder
+                # itself is skipped too
+                if PathUtils.should_skip_directory(item):
                     continue
 
                 # Index both files AND folders for comprehensive search
@@ -360,6 +518,101 @@ class FileSearchIndex:
             pass
 
         return items_added
+
+    def save_index(self, db_path: Path) -> bool:
+        """Persist in-memory index to a single SQLite file on disk.
+
+        Returns False if the cache could not be written. The cache is only a
+        speed optimisation, so a failure here must not discard a completed
+        index build.
+        """
+        try:
+            conn = sqlite3.connect(db_path)
+        except sqlite3.Error:
+            return False
+
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS files "
+                "(path TEXT PRIMARY KEY, name TEXT NOT NULL, is_dir INTEGER NOT NULL)"
+            )
+            conn.execute("DELETE FROM schema_version")
+            conn.execute("INSERT INTO schema_version VALUES (?)", (CACHE_SCHEMA_VERSION,))
+            conn.execute("DELETE FROM files")
+            rows = [
+                (str(meta.path), meta.name, int(meta.is_dir))
+                for meta_list in self.exact_match.values()
+                for meta in meta_list
+            ]
+            conn.executemany("INSERT OR IGNORE INTO files VALUES (?, ?, ?)", rows)
+            conn.commit()
+            return True
+        except (sqlite3.Error, OSError):
+            return False
+        finally:
+            conn.close()
+
+    def load_index(self, db_path: Path) -> bool:
+        """Rebuild in-memory index from SQLite cache. No filesystem I/O — fast startup.
+        Returns False if cache is missing, corrupt, or schema version mismatch."""
+        if not db_path.exists():
+            return False
+
+        try:
+            conn = sqlite3.connect(db_path)
+        except sqlite3.Error:
+            return False
+
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            version_row = conn.execute(
+                "SELECT version FROM schema_version"
+            ).fetchone()
+            if not version_row or version_row[0] != CACHE_SCHEMA_VERSION:
+                return False
+            rows = conn.execute(
+                "SELECT path, name, is_dir FROM files"
+            ).fetchall()
+        except sqlite3.Error:
+            # sqlite3.Error is the base class. Catching OperationalError alone
+            # missed the DatabaseError raised by a corrupt file, so a damaged
+            # cache crashed startup instead of triggering a rebuild.
+            return False
+        finally:
+            conn.close()
+
+        for path_str, name, is_dir in rows:
+            file_path = Path(path_str)
+            path_key = path_str.lower()
+            if path_key in self.indexed_paths:
+                continue
+            # Bypass FileMetadata.__init__ to avoid is_dir() filesystem calls on load
+            meta = FileMetadata.__new__(FileMetadata)
+            meta.path = file_path
+            meta.name = name
+            meta.suffix = file_path.suffix.lower()
+            meta.is_dir = bool(is_dir)
+            filename = name.lower()
+            self.trie.insert(filename, file_path)
+            if filename not in self.exact_match:
+                self.exact_match[filename] = []
+            self.exact_match[filename].append(meta)
+            words = FileSearchIndex._tokenize(filename)
+            for word in words:
+                if len(word) > MIN_WORD_LENGTH:
+                    self.word_index[word].add(file_path)
+            acronym = FileSearchIndex._acronym(filename)
+            if acronym:
+                self.word_index[acronym].add(file_path)
+                self.trie.insert(acronym, file_path)
+            self.indexed_paths.add(path_key)
+            self.total_items += 1
+
+        return True
 
     def search(self, query: str, max_results: int = 20) -> List[Path]:
         """Search using 4 strategies: exact, prefix, word, substring. Returns top results by relevance."""
@@ -393,6 +646,20 @@ class FileSearchIndex:
                     for metadata in metadata_list:
                         results.add(metadata.path)
 
+        # Strategy 5: Fuzzy fallback — only when the first four strategies are sparse
+        if RAPIDFUZZ_AVAILABLE and len(results) < FUZZY_MIN_RESULTS:
+            candidates = list(self.exact_match.keys())
+            matches = rf_process.extract(
+                query, candidates, scorer=rf_fuzz.WRatio,
+                limit=10, score_cutoff=FUZZY_SCORE_CUTOFF,
+            )
+            for match_name, *_ in matches:
+                for meta in self.exact_match[match_name]:
+                    results.add(meta.path)
+
+        # Filter stale trie entries — files removed by the watcher since last add
+        results = {p for p in results if str(p).lower() in self.indexed_paths}
+
         # Sort results by relevance and return top matches
         return self._sort_by_relevance(list(results), query)[:max_results]
 
@@ -424,6 +691,10 @@ class FileSearchIndex:
             ):
                 relevance_score += 10
 
+            # Usage-adaptive bonus: files the user opens frequently surface higher
+            opens = self.access_counts.get(str(path), 0)
+            relevance_score += min(opens * ACCESS_SCORE_WEIGHT, ACCESS_SCORE_MAX)
+
             return relevance_score
 
         return sorted(results, key=score, reverse=True)
@@ -438,7 +709,231 @@ class FileCommander:
 
     def __init__(self):
         self.search_index = FileSearchIndex()
-        self._index_built = False  # Cache flag to avoid re-indexing
+        self._index_built = False
+        self._observer = None
+        self._writer_thread = None
+        self._event_queue: queue.Queue = queue.Queue()
+        self._stop_event = threading.Event()
+
+    def load_or_build_index(self):
+        """Load from SQLite cache if available, otherwise run full build and save cache."""
+        if self.search_index.load_index(CACHE_DB_PATH):
+            UIUtils.print_success(
+                f"Index loaded from cache "
+                f"({self.search_index.total_items:,} items, <1s startup)"
+            )
+            self._index_built = True
+            return
+        # No cache — full indexing pass
+        self._build_fresh_index()
+        console.print("[dim]💾 Saving index to cache for next startup...[/dim]")
+        if self.search_index.save_index(CACHE_DB_PATH):
+            UIUtils.print_success("Cache saved — next startup will be instant")
+        else:
+            UIUtils.print_warning(
+                "Could not write the cache; searching still works, but the "
+                "next startup will re-index"
+            )
+
+    def _build_fresh_index(self):
+        """Full filesystem indexing pass (C: user folders + other drives complete)."""
+        console.print("[dim]📄 Indexing files using smart drive strategy...[/dim]")
+
+        c_drive_folders = [
+            Path.home() / "Downloads",
+            Path.home() / "Documents",
+            Path.home() / "Desktop",
+            Path.home() / "Videos",
+            Path.home() / "Pictures",
+            Path.home() / "Pictures" / "Samsung Flow",
+        ]
+
+        console.print("[dim]   🎯 C: drive - Indexing user folders only...[/dim]")
+        for folder in c_drive_folders:
+            if PathUtils.is_valid_folder(folder):
+                items_added = self.search_index.index_folder(folder)
+                if items_added > 0:
+                    console.print(
+                        f"[dim]      ✅ {folder.name}: {items_added} items[/dim]"
+                    )
+
+        drives = PathUtils.get_available_drives()
+        other_drives = [drive for drive in drives if drive.upper() != "C"]
+
+        if other_drives:
+            console.print(
+                f"[dim]   💾 Other drives ({', '.join(other_drives)}) - Complete indexing...[/dim]"
+            )
+            for drive in other_drives:
+                drive_path = PathUtils.get_drive_path(drive)
+                console.print(
+                    f"[dim]      📂 Indexing {drive}: drive completely...[/dim]"
+                )
+                items_added = self.search_index.index_folder(drive_path)
+                if items_added > 0:
+                    console.print(
+                        f"[dim]      ✅ {drive}: drive: {items_added} items indexed[/dim]"
+                    )
+                else:
+                    console.print(
+                        f"[dim]      ⚠️ {drive}: drive: No accessible items[/dim]"
+                    )
+        else:
+            console.print("[dim]   ℹ️ No additional drives found besides C:[/dim]")
+
+        UIUtils.print_success("Indexing complete")
+        self._index_built = True
+
+    def _start_watcher(self):
+        """Start watchdog observer + writer thread for real-time index delta updates."""
+        if not WATCHDOG_AVAILABLE:
+            UIUtils.print_warning(
+                "watchdog not installed — live index updates disabled. "
+                "Run: pip install watchdog"
+            )
+            return
+
+        watch_paths = [
+            Path.home() / "Downloads",
+            Path.home() / "Documents",
+            Path.home() / "Desktop",
+            Path.home() / "Videos",
+            Path.home() / "Pictures",
+        ]
+        for drive in PathUtils.get_available_drives():
+            if drive.upper() != "C":
+                watch_paths.append(PathUtils.get_drive_path(drive))
+
+        handler = IndexEventHandler(self._event_queue)
+        self._observer = Observer()
+        for path in watch_paths:
+            if PathUtils.is_valid_folder(path):
+                self._observer.schedule(handler, str(path), recursive=True)
+
+        self._observer.start()
+
+        self._writer_thread = threading.Thread(
+            target=FileCommander._writer_loop,
+            args=(
+                self.search_index,
+                CACHE_DB_PATH,
+                self._event_queue,
+                self._stop_event,
+            ),
+            daemon=True,
+            name="filefind-writer",
+        )
+        self._writer_thread.start()
+
+    def _stop_watcher(self):
+        """Stop filesystem watcher and writer thread gracefully."""
+        self._stop_event.set()
+        if self._observer:
+            self._observer.stop()
+            self._observer.join(timeout=3)
+        if self._writer_thread:
+            self._writer_thread.join(timeout=3)
+
+    @staticmethod
+    def _writer_loop(
+        search_index: FileSearchIndex,
+        db_path: Path,
+        event_queue: queue.Queue,
+        stop_event: threading.Event,
+    ):
+        """Drain the event queue and apply delta adds/removes to index + SQLite.
+        This loop must never crash — all exceptions are swallowed per-event."""
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            # Without a connection there is nothing to sync; leave the in-memory
+            # index alone rather than killing the thread with an exception
+            return
+
+        while not stop_event.is_set():
+            try:
+                op, src, dest = event_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            try:
+                if op == "insert":
+                    if not PathUtils.should_skip_directory(src) and src.exists():
+                        search_index.add_file(src)
+                        conn.execute(
+                            "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
+                            (str(src), src.name, int(src.is_dir())),
+                        )
+                        conn.commit()
+
+                elif op == "delete":
+                    search_index.remove_file(src)
+                    conn.execute(
+                        "DELETE FROM files WHERE LOWER(path) = ?",
+                        (str(src).lower(),),
+                    )
+                    conn.commit()
+
+                elif op == "move":
+                    if dest is not None and dest.is_dir():
+                        # Directory move: remove all stale entries, re-index destination
+                        src_prefix = str(src).lower() + os.sep.lower()
+                        stale = [
+                            p for p in list(search_index.indexed_paths)
+                            if p.startswith(src_prefix) or p == str(src).lower()
+                        ]
+                        for stale_lower in stale:
+                            search_index.remove_file(Path(stale_lower))
+                            conn.execute(
+                                "DELETE FROM files WHERE LOWER(path) = ?",
+                                (stale_lower,),
+                            )
+                        if dest.exists():
+                            search_index.index_folder(dest)
+                            for meta_list in search_index.exact_match.values():
+                                for meta in meta_list:
+                                    if str(meta.path).lower().startswith(
+                                        str(dest).lower()
+                                    ):
+                                        conn.execute(
+                                            "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
+                                            (str(meta.path), meta.name, int(meta.is_dir)),
+                                        )
+                        conn.commit()
+                    else:
+                        # File move: swap old path for new
+                        search_index.remove_file(src)
+                        conn.execute(
+                            "DELETE FROM files WHERE LOWER(path) = ?",
+                            (str(src).lower(),),
+                        )
+                        if dest is not None and dest.exists():
+                            search_index.add_file(dest)
+                            conn.execute(
+                                "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
+                                (str(dest), dest.name, int(dest.is_dir())),
+                            )
+                        conn.commit()
+
+            except Exception:
+                pass  # Writer loop must never crash; stale entries filtered in search()
+
+        conn.close()
+
+    def refresh_index(self):
+        """Wipe cache, stop watcher, rebuild index from scratch, restart watcher."""
+        UIUtils.print_section_header("🔄 Rebuilding Index")
+        self._stop_watcher()
+        self.search_index = FileSearchIndex()
+        self._index_built = False
+        self._stop_event = threading.Event()
+        self._event_queue = queue.Queue()
+        if CACHE_DB_PATH.exists():
+            CACHE_DB_PATH.unlink()
+        self.load_or_build_index()
+        self._start_watcher()
 
     def show_main_menu(self):
         """Display the main application menu with available operations."""
@@ -448,15 +943,15 @@ class FileCommander:
         title = Text()
         title.append("⚡ ", style="bold yellow")
         title.append("FILE COMMANDER", style="bold bright_cyan")
-        
+
         subtitle = Text("High-Performance File Search Engine", style="dim white")
-        
+
         # Create header panel with rounded borders
         header_content = Text.assemble(
             title, "\n", subtitle
         )
         header_content.justify = "center"
-        
+
         console.print()
         console.print(
             Panel(
@@ -473,6 +968,7 @@ class FileCommander:
         options = [
             ("1", "⚡", "Search", "Find and manage files"),
             ("2", "📊", "Statistics", "View search index status"),
+            ("3", "🔄", "Refresh Index", "Rebuild index from scratch"),
             ("0", "❌", "Exit", "Close application"),
         ]
 
@@ -484,7 +980,7 @@ class FileCommander:
             border_style="dim cyan",
             padding=(0, 1),
         )
-        
+
         table.add_column("", style="bold yellow", width=3, justify="center")
         table.add_column("", width=3, justify="center")
         table.add_column("Action", style="bold white", min_width=20)
@@ -512,57 +1008,10 @@ class FileCommander:
         """Index drives (once), then continuous search loop. Actions: open, rename, search again."""
         UIUtils.print_section_header("⚡ Search & Manage Files/Folders")
 
-        # Only build index if not already cached
+        # Load from cache or build fresh index on first use
         if not self._index_built:
-            # Build index with smart drive strategy
-            console.print("[dim]📄 Indexing files using smart drive strategy...[/dim]")
-
-            # Strategy 1: C: drive - targeted indexing (common user folders only)
-            c_drive_folders = [
-                Path.home() / "Downloads",
-                Path.home() / "Documents",
-                Path.home() / "Desktop",
-                Path.home() / "Videos",
-                Path.home() / "Pictures",
-                Path.home() / "Pictures" / "Samsung Flow",  # Phone sync location
-            ]
-
-            console.print("[dim]   🎯 C: drive - Indexing user folders only...[/dim]")
-            for folder in c_drive_folders:
-                if PathUtils.is_valid_folder(folder):
-                    items_added = self.search_index.index_folder(folder)
-                    if items_added > 0:
-                        console.print(
-                            f"[dim]      ✅ {folder.name}: {items_added} items[/dim]"
-                        )
-
-            # Strategy 2: Other drives (D:, E:, Z:, etc.) - complete indexing
-            drives = PathUtils.get_available_drives()
-            other_drives = [drive for drive in drives if drive.upper() != "C"]
-
-            if other_drives:
-                console.print(
-                    f"[dim]   💾 Other drives ({', '.join(other_drives)}) - Complete indexing...[/dim]"
-                )
-                for drive in other_drives:
-                    drive_path = PathUtils.get_drive_path(drive)
-                    console.print(
-                        f"[dim]      📂 Indexing {drive}: drive completely...[/dim]"
-                    )
-                    items_added = self.search_index.index_folder(drive_path)
-                    if items_added > 0:
-                        console.print(
-                            f"[dim]      ✅ {drive}: drive: {items_added} items indexed[/dim]"
-                        )
-                    else:
-                        console.print(
-                            f"[dim]      ⚠️ {drive}: drive: No accessible items[/dim]"
-                        )
-            else:
-                console.print("[dim]   ℹ️ No additional drives found besides C:[/dim]")
-
-            UIUtils.print_success("Indexing complete")
-            self._index_built = True  # Mark index as built
+            self.load_or_build_index()
+            self._start_watcher()
         else:
             UIUtils.print_info("Using cached index (instant search ready)")
 
@@ -595,6 +1044,9 @@ class FileCommander:
             else:
                 UIUtils.print_section_break()
                 UIUtils.print_warning(f"No items found for '{search_term}'")
+                suggestion = self.search_index.suggest_correction(search_term)
+                if suggestion:
+                    UIUtils.print_info(f"Did you mean: [bold]{suggestion}[/bold]?")
                 UIUtils.print_section_break()
 
                 # Ask if user wants to continue searching (only when no results)
@@ -667,7 +1119,7 @@ class FileCommander:
 
             return True  # Continue searching after open/rename
         elif action == "3":
-            return True  # ✅ Continue search loop (no re-indexing!)
+            return True  # Continue search loop (no re-indexing!)
         else:
             return False  # Back to main menu
 
@@ -679,6 +1131,7 @@ class FileCommander:
             os.startfile(str(item_path))
             item_type = PathUtils.get_item_type(item_path)
             UIUtils.print_success(f"Opened {item_type}: {item_path.name}")
+            self.search_index.record_access(item_path)
 
         UIUtils.safe_execute("opening item", open_operation)
 
@@ -750,7 +1203,21 @@ class FileCommander:
             [("Metric", "cyan", 20), ("Value", "green", 20), ("Details", "dim", 40)],
         )
 
-        # Show indexing status and performance metrics
+        # Cache file status
+        cache_exists = CACHE_DB_PATH.exists()
+        if cache_exists:
+            cache_size_kb = CACHE_DB_PATH.stat().st_size // 1024
+            cache_value = f"{cache_size_kb:,} KB"
+            cache_detail = str(CACHE_DB_PATH)
+        else:
+            cache_value = "Not found"
+            cache_detail = "Will be created on first search"
+
+        watcher_status = (
+            "✅ Running" if (self._observer and self._observer.is_alive())
+            else ("⚠️ Not available" if not WATCHDOG_AVAILABLE else "⏸ Not started")
+        )
+
         table.add_row("Status", "✅ Ready", "Optimized for instant search")
         table.add_row(
             "Items Indexed",
@@ -758,6 +1225,8 @@ class FileCommander:
             "Total files and folders in search index",
         )
         table.add_row("Search Speed", "< 1ms", "Microsecond-level performance")
+        table.add_row("Cache File", cache_value, cache_detail)
+        table.add_row("Live Watcher", watcher_status, "Real-time index delta updates")
 
         console.print(table)
         UIUtils.print_section_break()
@@ -769,7 +1238,7 @@ class FileCommander:
                 self.show_main_menu()
 
                 choice = UIUtils.get_user_choice(
-                    "Select option", ["0", "1", "2"]
+                    "Select option", ["0", "1", "2", "3"]
                 )
 
                 if choice == "0":
@@ -778,11 +1247,14 @@ class FileCommander:
                         "[bold yellow]👋 GOODBYE![/] Thank you for using File Commander"
                     )
                     UIUtils.print_section_break()
+                    self._stop_watcher()
                     break
                 elif choice == "1":
                     self.search_files()
                 elif choice == "2":
                     self.show_search_statistics()
+                elif choice == "3":
+                    self.refresh_index()
 
                 # Pause before returning to menu (better UX)
                 if choice != "0":
@@ -797,6 +1269,7 @@ class FileCommander:
                 UIUtils.print_section_break()
                 console.print("[bold yellow]👋 GOODBYE![/] Interrupted by user")
                 UIUtils.print_section_break()
+                self._stop_watcher()
                 break
             except Exception as e:
                 # Unexpected error handling
@@ -810,5 +1283,8 @@ class FileCommander:
 # APPLICATION ENTRY POINT
 
 if __name__ == "__main__":
+    # The floating overlay now lives in launcher/ui and is started by
+    # run_launcher.py. This file is the terminal application and the search
+    # engine behind it.
     commander = FileCommander()
     commander.run_interactive()

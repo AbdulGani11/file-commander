@@ -57,3 +57,53 @@ def test_get_item_type(path_utils, tmp_path):
     
     assert path_utils.get_item_type(d) == "folder"
     assert path_utils.get_item_type(f) == "file"
+
+
+def test_developer_directories_are_skipped(path_utils):
+    """Virtualenvs and tool caches must never reach the index.
+
+    Regression guard: indexing this repository without these exclusions gave
+    4,720 items, 4,650 of them from `venv` alone, burying the real files.
+    """
+    skipped = [
+        r"C:\proj\venv\Lib\site-packages\pip\__init__.py",
+        r"C:\proj\.venv\Lib\x.py",
+        r"C:\proj\.claude\worktrees\a\Readme.md",
+        r"C:\proj\.pytest_cache\v\cache\nodeids",
+        r"C:\proj\node_modules\react\index.js",
+        r"C:\proj\__pycache__\mod.cpython-311.pyc",
+        r"C:\proj\.mypy_cache\3.11\x.json",
+        r"C:\proj\.idea\workspace.xml",
+    ]
+    for raw in skipped:
+        assert path_utils.should_skip_directory(Path(raw)), raw
+
+
+def test_site_packages_catches_unconventional_env_names(path_utils):
+    """An environment folder need not be called venv to be excluded."""
+    assert path_utils.should_skip_directory(
+        Path(r"C:\proj\my-weird-env\Lib\site-packages\thing.py")
+    )
+
+
+def test_excluded_directory_itself_is_skipped(path_utils):
+    """The folder is skipped too, not only its contents.
+
+    Checking only the parent left the excluded folder indexable, so searching
+    for "venv" returned the directory whose contents had just been excluded.
+    """
+    assert path_utils.should_skip_directory(Path(r"C:\proj\venv"))
+    assert path_utils.should_skip_directory(Path(r"C:\proj\__pycache__"))
+
+
+def test_real_project_directories_are_not_skipped(path_utils):
+    """The exclusions must not swallow ordinary user folders."""
+    kept = [
+        r"C:\proj\src\main.py",
+        r"C:\Users\me\Documents\report.docx",
+        r"D:\Photos\2026\holiday.jpg",
+        r"C:\proj\tests\test_search.py",
+        r"C:\proj\environment\notes.txt",   # "env" alone must not match
+    ]
+    for raw in kept:
+        assert not path_utils.should_skip_directory(Path(raw)), raw

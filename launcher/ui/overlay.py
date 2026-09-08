@@ -173,6 +173,12 @@ class LauncherOverlay(QWidget):
         self._results = results
         self.result_list.clear()
 
+        # An empty window cannot be told apart from a broken one, so say so.
+        # Only when something was actually typed: an empty box is not a failure.
+        if not results and self.query_box.text().strip():
+            self._show_empty_state()
+            return
+
         for i, result in enumerate(results):
             item = QListWidgetItem()
             item.setData(RESULT_ROLE, result)
@@ -184,6 +190,27 @@ class LauncherOverlay(QWidget):
         if results:
             self.result_list.setCurrentRow(0)
 
+        self._resize_to_results()
+
+    def _show_empty_state(self) -> None:
+        """Render a single 'nothing matched' row instead of a blank window."""
+        query = self.query_box.text().strip()
+        notice = Result(
+            title="No results for “%s”" % query,
+            subtitle="Check the spelling, or try fewer letters",
+            # No action, so Enter does nothing and the window stays open
+            context={"placeholder": True},
+        )
+
+        item = QListWidgetItem()
+        item.setData(RESULT_ROLE, notice)
+        # Not selectable, so the arrow keys cannot land on it and Enter has
+        # nothing to run. _activate is also safe on its own, because
+        # self._results is empty while this row is showing.
+        item.setFlags(Qt.NoItemFlags)
+        self.result_list.addItem(item)
+
+        self.result_list.setCurrentRow(-1)
         self._resize_to_results()
 
     def _resize_to_results(self) -> None:

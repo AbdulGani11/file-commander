@@ -73,6 +73,14 @@ class ResultDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.TextAntialiasing, True)
 
         rect = option.rect
+
+        # The "no results" notice is a message, not a row you can act on, so it
+        # gets no icon, no shortcut badge and no selection highlight.
+        if result.context and result.context.get("placeholder"):
+            self._paint_placeholder(painter, rect, result)
+            painter.restore()
+            return
+
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
 
         # selection pill
@@ -163,6 +171,35 @@ class ResultDelegate(QStyledItemDelegate):
             )
 
         painter.restore()
+
+    def _paint_placeholder(self, painter: QPainter, rect: QRect, result) -> None:
+        """Draw the 'no results' notice: centred, dim, clearly not a result."""
+        t = self.theme
+        left = rect.left() + t.m("query_margin_left")
+        width = rect.width() - t.m("query_margin_left") - t.m("text_margin_right")
+
+        title_font = QFont(painter.font())
+        title_font.setPixelSize(t.m("title_font_size"))
+        painter.setFont(title_font)
+        painter.setPen(QColor(t.c("subtitle_fg")))
+        fm = QFontMetrics(title_font)
+        painter.drawText(
+            QRect(left, rect.top() + 8, width, fm.height()),
+            Qt.AlignLeft | Qt.AlignTop,
+            fm.elidedText(result.title, Qt.ElideRight, width),
+        )
+
+        if result.subtitle:
+            sub_font = QFont(painter.font())
+            sub_font.setPixelSize(t.m("subtitle_font_size"))
+            painter.setFont(sub_font)
+            painter.setPen(QColor(t.c("query_suggestion")))
+            fm_sub = QFontMetrics(sub_font)
+            painter.drawText(
+                QRect(left, rect.top() + 8 + fm.height() + 2, width, fm_sub.height()),
+                Qt.AlignLeft | Qt.AlignTop,
+                result.subtitle,
+            )
 
     def _paint_icon(self, painter: QPainter, rect: QRect, result) -> None:
         """Draw the real Windows icon for this row, falling back to a glyph.

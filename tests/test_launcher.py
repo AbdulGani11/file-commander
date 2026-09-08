@@ -425,3 +425,53 @@ def test_hotkey_signal_toggles_window_from_another_thread():
         assert not overlay.isVisible(), "second press did not hide the window"
     finally:
         overlay.close()
+
+
+def test_empty_search_shows_a_notice_not_a_blank_window():
+    """A blank window cannot be told apart from a broken one.
+
+    Typing something that matches nothing must say so. The notice is not a
+    result: it carries no action, cannot be selected, and Enter on it does
+    nothing.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+    from launcher.ui.result_view import RESULT_ROLE
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    try:
+        # Something was typed, but nothing matched
+        overlay.query_box.blockSignals(True)
+        overlay.query_box.setText("zzzqqq")
+        overlay.query_box.blockSignals(False)
+        overlay._set_results([])
+        app.processEvents()
+
+        assert overlay.result_list.count() == 1, "expected a single notice row"
+        notice = overlay.result_list.item(0).data(RESULT_ROLE)
+        assert "zzzqqq" in notice.title
+        assert notice.context.get("placeholder") is True
+        assert notice.action is None
+        assert overlay.result_list.currentRow() == -1, "notice must not be selected"
+
+        # Enter must not raise, and must not hide the window
+        overlay._activate()
+        assert overlay.result_list.count() == 1
+
+        # An empty box is not a failure, so it shows nothing at all
+        overlay.query_box.blockSignals(True)
+        overlay.query_box.setText("")
+        overlay.query_box.blockSignals(False)
+        overlay._set_results([])
+        app.processEvents()
+        assert overlay.result_list.count() == 0
+    finally:
+        overlay.close()

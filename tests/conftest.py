@@ -25,3 +25,21 @@ def trie():
 @pytest.fixture
 def search_index():
     return fc.FileSearchIndex()
+
+
+@pytest.fixture(autouse=True)
+def isolate_launcher_settings(tmp_path, monkeypatch):
+    """Keep the overlay's remembered position out of the real home directory.
+
+    The overlay saves its position and scale on shutdown, and every Qt test
+    closes an overlay. Without this, a run would write an offscreen test
+    window's coordinates into ~/.filefind_launcher.json and move the user's
+    real launcher the next time they started it.
+    """
+    try:
+        from launcher.ui import overlay
+    except ImportError:
+        return              # PySide6 absent; those tests skip anyway
+    monkeypatch.setattr(
+        overlay, "SETTINGS_PATH", tmp_path / "launcher.json", raising=False
+    )

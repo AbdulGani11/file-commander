@@ -660,6 +660,226 @@ def test_icon_cache_is_bounded(tmp_path):
     assert newest in result_view._ICON_CACHE, "most recent icon was evicted"
 
 
+# Window placement, scaling, and when the overlay is allowed to hide
+
+
+def test_theme_scales_pixels_but_not_counts():
+    """Scaling must multiply pixel metrics and leave the rest alone.
+
+    An interface scale is a zoom: fonts, rows, icons and width grow together.
+    Row counts and animation durations are not lengths and must not be caught
+    up in it.
+    """
+    pytest.importorskip("PySide6")
+
+    from launcher.ui.theme import BASE, MAX_SCALE, MIN_SCALE, Theme, clamp_scale
+
+    normal = Theme("Dark")
+    assert normal.scale == 1.0
+
+    big = Theme("Dark", 2.0)
+    assert big.m("window_width") == BASE["window_width"] * 2
+    assert big.m("title_font_size") == BASE["title_font_size"] * 2
+    assert big.m("item_height") == BASE["item_height"] * 2
+
+    # Not lengths: these stay put at any scale
+    assert big.m("max_visible_items") == BASE["max_visible_items"]
+    assert big.m("animation_ms") == BASE["animation_ms"]
+
+    # Out-of-range requests are held at the limits rather than rejected
+    assert Theme("Dark", 99.0).scale == MAX_SCALE
+    assert Theme("Dark", 0.01).scale == MIN_SCALE
+    assert clamp_scale("nonsense") == 1.0
+
+    # Nothing may collapse to zero pixels at the smallest scale
+    smallest = Theme("Dark", MIN_SCALE)
+    assert all(v >= 1 for v in smallest.metrics.values())
+
+    # The palette is carried across unchanged
+    assert Theme("Light", 1.5).c("window_bg") == Theme("Light").c("window_bg")
+
+
+def test_dragging_the_corner_scales_the_whole_interface():
+    """Dragging must resize text and rows together, not stretch the window."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+    from launcher.ui.theme import MAX_SCALE
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    try:
+        start_width = overlay.width()
+        start_row = overlay.theme.m("item_height")
+        start_font = overlay.theme.m("title_font_size")
+
+        overlay.set_scale(1.5)
+        app.processEvents()
+
+        assert overlay.width() > start_width, "window did not widen"
+        assert overlay.theme.m("item_height") > start_row, "rows did not grow"
+        assert overlay.theme.m("title_font_size") > start_font, "text did not grow"
+
+        # Scaling back down must work too, not just up
+        overlay.set_scale(0.8)
+        app.processEvents()
+        assert overlay.width() < start_width, "window did not shrink below default"
+
+        # And it must refuse to leave the supported range
+        overlay.set_scale(50.0)
+        app.processEvents()
+        assert overlay.theme.scale == MAX_SCALE
+    finally:
+        overlay.close()
+
+
+def test_position_and_scale_survive_a_restart(tmp_path):
+    """Where the user put the window is where it must reappear."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    app = QApplication.instance() or QApplication([])
+
+    first = LauncherOverlay(Dispatcher(), "Dark")
+    try:
+        first.set_scale(1.4)
+        first.move(QPoint(140, 260))
+        app.processEvents()
+        first.shutdown()                 # writes the settings file
+    finally:
+        first.close()
+
+    second = LauncherOverlay(Dispatcher(), "Dark")
+    try:
+        assert abs(second.theme.scale - 1.4) < 0.001, "scale was not remembered"
+        second._place()
+        app.processEvents()
+        assert second.pos() == QPoint(140, 260), "position was not remembered"
+    finally:
+        second.close()
+
+
+def test_a_saved_position_off_screen_falls_back_to_centre():
+    """A position from a monitor that is no longer attached must not strand it."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    try:
+        overlay._settings = {"x": -30000, "y": -30000}
+        overlay._place()
+        assert overlay._on_a_screen(overlay.pos()), "window opened off the desktop"
+    finally:
+        overlay.close()
+
+
+def test_losing_focus_does_not_hide_the_window():
+    """Only Escape, the hotkey, or opening a result may hide the overlay.
+
+    Hiding on focus loss is the usual launcher behaviour and was this one's,
+    but it throws away a half-typed query as soon as anything else is clicked.
+    A hide the overlay did not ask for is undone.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    def pump(rounds=30):
+        for _ in range(rounds):
+            app.processEvents()
+            time.sleep(0.005)
+
+    try:
+        overlay.show_overlay()
+        pump()
+        assert overlay.isVisible()
+
+        overlay.query_box.setText("half typed")
+
+        # Stands in for the window manager withdrawing it on deactivation
+        overlay.hide()
+        pump()
+
+        assert overlay.isVisible(), "an outside hide was not undone"
+        assert overlay.query_box.text() == "half typed", "the query was discarded"
+
+        # Deliberate hides still work, and do clear the box
+        overlay.hide_overlay()
+        pump()
+        assert not overlay.isVisible(), "Escape or the hotkey failed to hide it"
+        assert overlay.query_box.text() == ""
+    finally:
+        overlay.close()
+
+
+def test_only_the_margin_starts_a_drag():
+    """Dragging must not steal clicks from the query box or the result rows."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+    from launcher.ui.overlay import RESIZE_GRIP
+
+    QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    try:
+        overlay._set_results([Result(title="row%d" % i) for i in range(3)])
+        rect = overlay.rect()
+
+        # Middle of the window belongs to the widgets, not to dragging
+        assert overlay._zone_at(rect.center()) is None
+
+        # The margin moves it
+        assert overlay._zone_at(QPoint(rect.center().x(), 2)) == "move"
+        assert overlay._zone_at(QPoint(2, rect.center().y())) == "move"
+
+        # The bottom-right corner scales instead
+        corner = QPoint(rect.right() - 2, rect.bottom() - 2)
+        assert overlay._zone_at(corner) == "scale"
+
+        # Just inside the corner grip is still scale; well clear of it is not
+        assert overlay._zone_at(
+            QPoint(rect.right() - RESIZE_GRIP + 1, rect.bottom() - 2)
+        ) == "scale"
+    finally:
+        overlay.close()
+
+
 def test_ordinary_files_share_one_icon_per_type():
     """Documents of the same type must share a single rendered icon.
 

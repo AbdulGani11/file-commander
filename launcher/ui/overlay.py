@@ -10,13 +10,17 @@ Each request carries a sequence number and late replies from superseded
 queries are dropped, which complements the cancellation inside the dispatcher.
 """
 
+import json
+from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
     QObject,
+    QPoint,
     QPropertyAnimation,
     QThread,
+    QTimer,
     Qt,
     Signal,
     Slot,
@@ -41,10 +45,23 @@ from PySide6.QtWidgets import (
 from ..dispatcher import Dispatcher
 from ..models import Result
 from .result_view import RESULT_ROLE, ResultList
-from .theme import DEFAULT_THEME, Theme
+from .theme import DEFAULT_SCALE, DEFAULT_THEME, Theme, clamp_scale
 
 # Outer transparent padding reserved for the drop shadow.
 SHADOW_PAD = 24
+
+# Where the window remembers its position and scale between runs. Sits beside
+# the engine's own dotfiles, and like them a failure to read or write it is
+# never worth interrupting the user for.
+SETTINGS_PATH = Path.home() / ".filefind_launcher.json"
+
+# The shadow margin is the only part of the window no child widget occupies, so
+# it is where dragging can be picked up without fighting the query box for text
+# selection or the result list for row clicks.
+GRIP = SHADOW_PAD
+
+# Size of the bottom-right square that scales instead of moves.
+RESIZE_GRIP = SHADOW_PAD + 10
 
 
 class QueryWorker(QObject):
@@ -79,7 +96,6 @@ class LauncherOverlay(QWidget):
     def __init__(self, dispatcher: Dispatcher, theme_name: str = DEFAULT_THEME):
         super().__init__()
         self._dispatcher = dispatcher
-        self.theme = Theme(theme_name)
         self._seq = 0
         self._results: List[Result] = []
 
@@ -89,6 +105,21 @@ class LauncherOverlay(QWidget):
         self._surface: Optional[QPixmap] = None
         self._surface_key = None
 
+        # Position and scale carried over from the last run
+        self._settings = self._load_settings()
+        self.theme = Theme(theme_name, self._settings.get("scale", DEFAULT_SCALE))
+
+        # Drag state. _drag_mode is None, "move" or "scale".
+        self._drag_mode: Optional[str] = None
+        self._drag_origin = QPoint()
+        self._drag_window_pos = QPoint()
+        self._drag_start_scale = DEFAULT_SCALE
+
+        # Hiding is explicit: Escape, the hotkey, or opening a result. Anything
+        # else that hides this window is undone; see hideEvent.
+        self._hiding_deliberately = False
+        self._wants_visible = False
+
         self._build_window()
         self._build_ui()
         self._start_worker()
@@ -97,6 +128,30 @@ class LauncherOverlay(QWidget):
         # Queued automatically, because emitter and receiver are on different threads
         self.hotkey_pressed.connect(self.toggle)
         self._install_row_shortcuts()
+
+    # persisted geometry
+
+    @staticmethod
+    def _load_settings() -> dict:
+        """Read the remembered position and scale. Never raises."""
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_settings(self) -> None:
+        """Remember where the window is and how big. Never raises."""
+        self._settings["scale"] = self.theme.scale
+        if not self.pos().isNull():
+            self._settings["x"] = self.pos().x()
+            self._settings["y"] = self.pos().y()
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as handle:
+                json.dump(self._settings, handle)
+        except Exception:
+            pass                # losing the position is not worth a crash
 
     # construction
 
@@ -108,6 +163,10 @@ class LauncherOverlay(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setFixedWidth(self.theme.m("window_width") + SHADOW_PAD * 2)
+
+        # Needed for the move and scale cursors to appear on hover rather than
+        # only once a button is already down.
+        self.setMouseTracking(True)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -167,6 +226,11 @@ class LauncherOverlay(QWidget):
         self.result_list.set_theme(theme)
         self.query_box.setFixedHeight(theme.m("query_height"))
         self.setFixedWidth(theme.m("window_width") + SHADOW_PAD * 2)
+
+        # Row height comes from the delegate's sizeHint, which the view caches
+        # because uniform item sizes are on. Without this a scale change moves
+        # the text and icons but leaves the rows their old height.
+        self.result_list.doItemsLayout()
         self._resize_to_results()
 
     # query flow
@@ -309,6 +373,75 @@ class LauncherOverlay(QWidget):
         self._surface = pixmap
         return pixmap
 
+    # moving and scaling
+
+    def _zone_at(self, pos: QPoint) -> Optional[str]:
+        """Which drag zone a point falls in, or None for the window contents.
+
+        Only the shadow margin qualifies. It is the one region no child widget
+        covers, so picking drags up there costs the query box no text selection
+        and the result list no clicks.
+        """
+        rect = self.rect()
+        body = rect.adjusted(GRIP, GRIP, -GRIP, -GRIP)
+        if body.contains(pos):
+            return None
+
+        near_right = pos.x() >= rect.right() - RESIZE_GRIP
+        near_bottom = pos.y() >= rect.bottom() - RESIZE_GRIP
+        if near_right and near_bottom:
+            return "scale"
+        return "move"
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_mode == "move":
+            delta = event.globalPosition().toPoint() - self._drag_origin
+            self.move(self._drag_window_pos + delta)
+            return
+
+        if self._drag_mode == "scale":
+            # Horizontal travel drives the scale, so the window grows away from
+            # its top-left corner and does not walk across the screen.
+            delta = event.globalPosition().toPoint().x() - self._drag_origin.x()
+            base = max(1, self.width())
+            self.set_scale(self._drag_start_scale * (base + delta * 2) / base)
+            return
+
+        # Not dragging: let the cursor advertise what each edge does
+        zone = self._zone_at(event.position().toPoint())
+        if zone == "scale":
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif zone == "move":
+            self.setCursor(Qt.SizeAllCursor)
+        else:
+            self.unsetCursor()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            return
+        zone = self._zone_at(event.position().toPoint())
+        if zone is None:
+            return
+        self._drag_mode = zone
+        self._drag_origin = event.globalPosition().toPoint()
+        self._drag_window_pos = self.pos()
+        self._drag_start_scale = self.theme.scale
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag_mode is not None:
+            self._drag_mode = None
+            self._save_settings()
+
+    def leaveEvent(self, event) -> None:
+        self.unsetCursor()
+
+    def set_scale(self, scale: float) -> None:
+        """Resize the whole interface, text and rows included."""
+        scale = clamp_scale(scale)
+        if abs(scale - self.theme.scale) < 0.005:
+            return                  # ignore sub-pixel jitter while dragging
+        self.apply_theme(self.theme.rescaled(scale))
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
 
@@ -369,7 +502,8 @@ class LauncherOverlay(QWidget):
     # visibility
 
     def show_overlay(self) -> None:
-        self._centre()
+        self._wants_visible = True
+        self._place()
         self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
@@ -383,16 +517,63 @@ class LauncherOverlay(QWidget):
         self._anim.start()
 
     def hide_overlay(self) -> None:
+        self._wants_visible = False
         self._dispatcher.cancel()
-        self.hide()
+
+        self._hiding_deliberately = True
+        try:
+            self.hide()
+        finally:
+            self._hiding_deliberately = False
+
         self.query_box.clear()
         self._set_results([])
+
+    def hideEvent(self, event) -> None:
+        """Undo a hide this window did not ask for.
+
+        Closing on focus loss is what most launchers do, and it is what this one
+        did, but it loses a half-typed query the moment anything else is
+        clicked. Hiding is now deliberate only: Escape, the hotkey, or opening a
+        result. Anything else -- the window manager withdrawing a tool window
+        when the application deactivates, for one -- is reversed on the next
+        turn of the event loop.
+        """
+        super().hideEvent(event)
+        if self._hiding_deliberately or not self._wants_visible:
+            return
+        QTimer.singleShot(0, self._restore_if_wanted)
+
+    def _restore_if_wanted(self) -> None:
+        """Bring the window back after an outside hide, without stealing focus."""
+        if self._wants_visible and not self.isVisible():
+            self.show()
+            self.raise_()
 
     def toggle(self) -> None:
         if self.isVisible():
             self.hide_overlay()
         else:
             self.show_overlay()
+
+    def _place(self) -> None:
+        """Put the window where the user last left it, or centre it."""
+        if "x" in self._settings and "y" in self._settings:
+            point = QPoint(int(self._settings["x"]), int(self._settings["y"]))
+            if self._on_a_screen(point):
+                self.move(point)
+                return
+            # The screen it was on is gone, so fall back rather than open
+            # the window off the edge of the desktop
+        self._centre()
+
+    @staticmethod
+    def _on_a_screen(point: QPoint) -> bool:
+        """True if a saved position still lands on a connected display."""
+        return any(
+            screen.availableGeometry().contains(point)
+            for screen in QGuiApplication.screens()
+        )
 
     def _centre(self) -> None:
         screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
@@ -409,6 +590,8 @@ class LauncherOverlay(QWidget):
         never closes a hidden window, so the thread outlived the application and
         Qt reported "QThread: Destroyed while thread is still running".
         """
+        self._wants_visible = False
+        self._save_settings()
         if self._thread is not None and self._thread.isRunning():
             self._thread.quit()
             self._thread.wait(2000)

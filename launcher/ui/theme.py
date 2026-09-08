@@ -102,20 +102,47 @@ THEMES: Dict[str, Dict[str, str]] = {
 
 DEFAULT_THEME = "Dark"
 
+# Interface scale. Dragging the window's corner multiplies every pixel metric
+# below, so text, rows, icons and width grow together rather than the window
+# stretching around fixed-size contents.
+DEFAULT_SCALE = 1.0
+MIN_SCALE = 0.7      # below this the 13px subtitle stops being readable
+MAX_SCALE = 2.0      # above this a 600px box no longer fits a 1080p screen well
+
+# Metrics that are not pixel measurements and must not be multiplied.
+UNSCALED_METRICS = {"animation_ms", "max_visible_items"}
+
+
+def clamp_scale(scale: float) -> float:
+    """Hold a scale inside the supported range."""
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        return DEFAULT_SCALE
+    return max(MIN_SCALE, min(MAX_SCALE, value))
+
 
 class Theme:
     """A resolved theme: shared layout metrics plus one colour palette."""
 
-    def __init__(self, name: str = DEFAULT_THEME):
+    def __init__(self, name: str = DEFAULT_THEME, scale: float = DEFAULT_SCALE):
         self.name = name if name in THEMES else DEFAULT_THEME
         self.colors = dict(THEMES[self.name])
-        self.metrics = dict(BASE)
+        self.scale = clamp_scale(scale)
+        self.metrics = {
+            key: value if key in UNSCALED_METRICS else max(1, round(value * self.scale))
+            for key, value in BASE.items()
+        }
 
     def c(self, key: str) -> str:
         return self.colors[key]
 
     def m(self, key: str) -> int:
         return self.metrics[key]
+
+    def rescaled(self, scale: float) -> "Theme":
+        """The same palette at a different interface scale."""
+        return Theme(self.name, scale)
 
     @staticmethod
     def names():

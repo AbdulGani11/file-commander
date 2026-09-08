@@ -21,7 +21,15 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QPainter, QPen
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QKeyEvent,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QLineEdit,
@@ -81,6 +89,7 @@ class LauncherOverlay(QWidget):
 
         # Queued automatically, because emitter and receiver are on different threads
         self.hotkey_pressed.connect(self.toggle)
+        self._install_row_shortcuts()
 
     # construction
 
@@ -263,16 +272,31 @@ class LauncherOverlay(QWidget):
             self._move(-1)
             return
 
-        # Alt+1..9 quick launch
-        if event.modifiers() & Qt.AltModifier:
-            if Qt.Key_1 <= key <= Qt.Key_9:
-                index = key - Qt.Key_1
-                if index < len(self._results):
-                    self.result_list.setCurrentRow(index)
-                    self._activate()
-                return
-
+        # Alt+1..9 is handled by QShortcut, not here. See _install_row_shortcuts.
         super().keyPressEvent(event)
+
+    def _install_row_shortcuts(self) -> None:
+        """Bind Alt+1 to Alt+9 to the first nine rows.
+
+        These cannot be read from keyPressEvent. Alt is the menu mnemonic
+        modifier on Windows, so the query box consumes the digit and only the
+        bare Alt keypress ever reaches this widget. A QShortcut is matched
+        before normal key delivery, which sidesteps that entirely.
+        """
+        self._row_shortcuts = []
+        for number in range(1, 10):
+            shortcut = QShortcut(QKeySequence("Alt+%d" % number), self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(
+                lambda index=number - 1: self._activate_row(index)
+            )
+            self._row_shortcuts.append(shortcut)
+
+    def _activate_row(self, index: int) -> None:
+        """Open the row at `index`, if there is one."""
+        if 0 <= index < len(self._results):
+            self.result_list.setCurrentRow(index)
+            self._activate()
 
     def _move(self, delta: int) -> None:
         count = self.result_list.count()

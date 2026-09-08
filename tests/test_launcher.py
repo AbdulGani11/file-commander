@@ -475,3 +475,60 @@ def test_empty_search_shows_a_notice_not_a_blank_window():
         assert overlay.result_list.count() == 0
     finally:
         overlay.close()
+
+
+def test_alt_number_opens_the_matching_row():
+    """Alt+N must open row N.
+
+    Regression guard: this was handled in keyPressEvent, but Alt is the menu
+    mnemonic modifier on Windows, so the query box consumed the digit and only
+    the bare Alt keypress ever reached the overlay. Pressing Alt+3 did nothing.
+    A QShortcut is matched before normal key delivery.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+    opened = []
+
+    def rows():
+        # Activating hides the window and clears results, so rebuild each time
+        return [
+            Result(title="row%d" % i, score=100 - i,
+                   action=lambda i=i: opened.append(i) or True)
+            for i in range(5)
+        ]
+
+    try:
+        for key, expected in [(Qt.Key_1, 0), (Qt.Key_3, 2), (Qt.Key_5, 4)]:
+            opened.clear()
+            overlay.show()
+            overlay._set_results(rows())
+            app.processEvents()
+
+            QTest.keyClick(overlay.focusWidget(), key, Qt.AltModifier)
+            for _ in range(20):
+                app.processEvents()
+
+            assert opened == [expected], "Alt+%d opened %r" % (expected + 1, opened)
+
+        # Beyond the end of the list, nothing should happen
+        opened.clear()
+        overlay.show()
+        overlay._set_results(rows())
+        app.processEvents()
+        QTest.keyClick(overlay.focusWidget(), Qt.Key_9, Qt.AltModifier)
+        for _ in range(20):
+            app.processEvents()
+        assert opened == []
+    finally:
+        overlay.close()

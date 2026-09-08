@@ -266,14 +266,18 @@ def test_application_outranks_similarly_named_file():
             from pathlib import Path
             return [Path(r"C:\proj\.vscode"), Path(r"C:\proj\vsc_notes.txt")]
 
+    d = Dispatcher()
     apps = AppPlugin()
+    d.register(apps)
+    d.register(FilePlugin(FakeIndex()))
+
+    # Replace the app list *after* registering. register() calls init(), which
+    # rescans the real machine and would discard anything set beforehand. Doing
+    # it in the wrong order made this test pass only on machines that happen to
+    # have Visual Studio Code installed.
     apps._apps = [
         AppEntry("Visual Studio Code", Path(r"C:\apps\Code.lnk"), "Start Menu")
     ]
-
-    d = Dispatcher()
-    d.register(apps)
-    d.register(FilePlugin(FakeIndex()))
 
     results = d.query("vsc")
 

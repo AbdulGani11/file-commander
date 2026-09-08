@@ -50,10 +50,6 @@ class CancellationToken:
         return self._event.wait(timeout)
 
 
-# A token that is never cancelled, for direct calls and tests
-NULL_TOKEN = CancellationToken()
-
-
 @runtime_checkable
 class Plugin(Protocol):
     """Anything that turns a Query into Results."""

@@ -6,7 +6,7 @@ Search queries run with $O(m)$ prefix speed, where $m$ is the number of letters 
 
 ## Main Features
 
-- **Five Step Search System:** Looks for files using five methods in order: exact filename match, prefix tree lookup, word index search, substring scan, and optional typo correction.
+- **Five Step Search System:** Looks for files using five methods in order: exact filename match, prefix tree lookup, word index search, substring scan, and optional fuzzy matching. The last two are expensive, so they run only when the cheaper ones return too little.
     
 - **Fast Startup on Later Runs:** Saves index data to an SQLite database file at `~/.filefind_cache.db`. Measured on the development machine, a later start rebuilds the whole index of $39{,}930$ files from that cache in $0.71$ seconds, against $19.5$ seconds to crawl the same folders from disk.
     
@@ -22,7 +22,7 @@ Search queries run with $O(m)$ prefix speed, where $m$ is the number of letters 
     
 - **Smart Folder Scanning:** Indexes important user folders on your main C: drive while scanning secondary drives and USB storage completely.
     
-- **Built in Safety and Security:** Blocks unsafe folder path tricks, reserved Windows system names, invalid Windows letters, and folder shortcut loops.
+- **Built in Safety and Security:** Refuses to follow folder shortcut loops, prunes system folders from the scan, and hands files to Windows directly rather than building a shell command. It indexes and opens; it never writes.
     
 
 ## How Search Works
@@ -97,60 +97,23 @@ Old search tree references are filtered out before ranking by checking every mat
 
 ## Packages and Requirements
 
-The command line tool only needs `rich` to run. Other tools are optional, and FileFind continues running safely even if an optional package is missing. The graphical floating window mode needs the packages marked **Launcher** in the table below.
+The search engine itself needs nothing outside the Python standard library. The packages marked **Launcher** are what the window needs; the two optional ones improve the engine but are never required.
 
 |   |   |   |   |
 |---|---|---|---|
 |**Package**|**Minimum Version**|**Requirement**|**What Is Lost If Missing**|
-|`rich`|`>= 15.0.0`|Required|The command line screen cannot display without it|
-|`watchdog`|`>= 6.0.0`|Optional|Live background file change tracking|
-|`rapidfuzz`|`>= 3.14.6`|Optional|Typo correction and "Did you mean?" suggestions|
-|`keyboard`|`>= 0.13.5`|Launcher|Global hotkey to open the floating window|
 |`PySide6-Essentials`|`>= 6.11.2`|Launcher|Drawing the graphical search window|
+|`keyboard`|`>= 0.13.5`|Launcher|Global hotkey to open the floating window|
+|`watchdog`|`>= 6.0.0`|Optional|Live background file change tracking|
+|`rapidfuzz`|`>= 3.14.6`|Optional|Fuzzy matching when the other strategies find too little|
 |`pytest`|`>= 9.1.1`|Development|Running automated tests|
 |`pytest-cov`|`>= 7.1.0`|Development|Creating test coverage reports|
 
-The command line application checks optional packages on startup and sets status flags (`WATCHDOG_AVAILABLE`, `RAPIDFUZZ_AVAILABLE`). The core search engine works completely with only `rich` installed.
+The engine checks the optional packages on import and sets status flags (`WATCHDOG_AVAILABLE`, `RAPIDFUZZ_AVAILABLE`), then degrades quietly rather than failing if either is absent.
 
-The two packages marked **Launcher** are only needed when running the graphical window (`run_launcher.py`). The terminal tool does not load them.
+Without `keyboard` the window still opens at launch, it simply has no global shortcut.
 
 ## How to Use FileFind
-
-FileFind gives you two ways to work.
-
-### 1. Interactive Terminal Mode
-
-Launch the terminal menu:
-
-```
-python FileFind.py
-```
-
-#### Main Menu Choices
-
-- **`1` Search:** Enter search words to find files. Displays ranked matches with index numbers, names, file types, and locations.
-    
-- **`2` Statistics:** Shows index status, total file count, database cache location, file size, and background file watcher status.
-    
-- **`3` Refresh Index:** Deletes the saved cache file and scans all folders again from scratch.
-    
-- **`0` Exit:** Stops background listeners and closes cleanly.
-    
-
-#### What You Can Do With a Result
-
-After picking a search result number, you can:
-
-- **Open:** Opens the file or folder using its standard Windows program.
-    
-- **Rename:** Prompts for a new name with security checks, and offers an instant undo option.
-    
-- **New Search:** Clears current results and starts a new search.
-    
-- **Return:** Goes back to the main menu.
-    
-
-### 2. Floating Launcher Window Mode
 
 Run FileFind as a background launcher with a global hotkey and a graphical pop up window:
 
@@ -191,13 +154,13 @@ Because the index is already loaded in computer memory, opening the search box i
 - **Clicking another window does not hide the launcher.** It stays open with whatever you typed still in it. This is deliberate: losing a half typed search to a stray click costs more than tidying itself away is worth. Hiding is always `Escape`, the hotkey, or opening a result.
     
 
-Launcher mode uses `PySide6-Essentials` to draw the window and `keyboard` for the shortcut key. If the shortcut cannot register, the window still opens on launch, and the terminal tool continues to work normally.
+Launcher mode uses `PySide6-Essentials` to draw the window and `keyboard` for the shortcut key. If the shortcut cannot register, the window still opens on launch.
 
 ## Project Files
 
 ```
 FileFind/
-├── FileFind.py           Search engine and interactive terminal interface
+├── FileFind.py           Search engine: index, cache and filesystem watcher
 ├── run_launcher.py       Entry point for the graphical launcher window
 ├── launcher/             Launcher application package
 │   ├── models.py         Data types for queries and results
@@ -216,32 +179,31 @@ FileFind/
 └── .github/workflows/    Automated test configuration
 ```
 
-Both entry points share the same search core. `FileFind.py` holds the search structures and terminal menus. The `launcher/` folder adds window controls, app discovery, and plug in routing on top of the search engine.
+`FileFind.py` is the engine and holds no user interface: the search structures, the SQLite cache and the filesystem watcher. The `launcher/` folder adds the window, application discovery, and plug in routing on top of it. `run_launcher.py` is the only entry point.
 
 ## Built in Safety and Security
 
 ```
-User Input or File Change Event
-│
-├── Input Cleaning and Validation
-│   ├── Rejects blank names and spaces
-│   ├── Blocks folder escape tricks ("..", "\", "/")
-│   ├── Limits filename length to 255 characters
-│   └── Blocks reserved Windows device names (CON, PRN, AUX, NUL, COM1..9, LPT1..9)
-│
-├── Folder Boundary Check
-│   └── Verifies: new_path.parent.resolve() == original_path.parent.resolve()
+Search Query or File Change Event
 │
 ├── Folder Scanning Limits
-│   ├── Skips NTFS folder shortcuts and symlinks
-│   └── Skips folders listed in SKIP_DIRECTORIES
+│   ├── Skips NTFS folder shortcuts and symlinks, so a scan cannot
+│   │   escape its intended folder through a junction
+│   └── Skips every folder listed in SKIP_DIRECTORIES, at any depth
+│
+├── Read Only by Design
+│   └── FileFind indexes and opens. It never renames, moves or deletes,
+│       so a malicious filename has no write path to reach
 │
 └── Safe Program Launching
     ├── Never runs command line shells (cmd.exe or PowerShell are bypassed)
+    ├── Never resolves shortcuts by hand; Windows follows the .lnk itself
     └── Hands files directly to the operating system using os.startfile()
 ```
 
 FileFind never builds command text strings from filenames, which prevents unusual or malicious filenames from running unwanted commands on your computer.
+
+The strongest protection is what the program does not do. Renaming files, and the filename validation that guarded it, belonged to the terminal application and went with it.
 
 ## Automated Testing
 
@@ -258,7 +220,7 @@ pytest
 Run tests and view code test coverage:
 
 ```
-pytest --cov=FileFind
+pytest --cov=FileFind --cov=launcher
 ```
 
 ### What the Tests Check
@@ -316,7 +278,7 @@ Tests run directly on Windows runners so that Windows specific path features and
 |**Saved Cache**|SQLite database with Write Ahead Logging enabled|
 |**File Watcher**|Event listener checking Windows folder change signals|
 |**Typo Matching**|Word similarity scoring using `rapidfuzz`|
-|**Terminal Display**|Rich tables, status indicators, and input menus|
+|**Dependencies**|Standard library only for the engine; Qt and `keyboard` for the window|
 |**Graphical Window**|`PySide6` frameless search window with `keyboard` shortcut|
 |**Opening Files**|Native `os.startfile()` handoff directly to Windows|
 |**Testing**|Pytest runner with GitHub Actions workflow on Windows runners|

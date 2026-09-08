@@ -11,7 +11,7 @@ Not Levenshtein distance: a user typing "vsc" has not made three typos, they
 have typed an abbreviation. Position and compactness matter more than edit count.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 
 # CONSTANTS - Centralized configuration for easy maintenance
@@ -270,12 +270,3 @@ def score(query: str, text: str) -> int:
     return match(query, text).score
 
 
-def best_of(query: str, texts: List[str]) -> Tuple[int, int]:
-    """Score a query against several names, returning (best score, its index)."""
-    best_score = 0
-    best_index = -1
-    for i, text in enumerate(texts):
-        s = score(query, text)
-        if s > best_score:
-            best_score, best_index = s, i
-    return best_score, best_index

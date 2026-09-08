@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """
-FileFind - File Search Tool
+FileFind - File Search Engine
 
-Search using Trie data structures and multi-strategy algorithms.
-Built for Windows.
+A Trie, an inverted word index and an exact-match dictionary over filenames,
+persisted to SQLite and kept current by a filesystem watcher. Built for Windows.
+
+This module is the engine only. The user interface is the Qt overlay in
+`launcher/`, started by `run_launcher.py`; there is no terminal application and
+nothing here prints beyond a few lines of indexing progress.
 """
 
-import os
 import json
-import time
-import sqlite3
+import os
 import queue
+import sqlite3
 import threading
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
-
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from rich.prompt import Prompt, Confirm
-from rich import box
+from typing import List, Optional
 
 try:
     from watchdog.observers import Observer
@@ -38,10 +34,6 @@ except ImportError:
     RAPIDFUZZ_AVAILABLE = False
     rf_process = None
     rf_fuzz = None
-
-# Initialize Rich console for beautiful terminal output
-console = Console()
-
 
 # CONSTANTS - Centralized configuration for easy maintenance
 
@@ -78,8 +70,6 @@ SKIP_DIRECTORIES = {
 # Search configuration constants
 MIN_WORD_LENGTH = 2  # Minimum word length to index (skip short words like 'a', 'of')
 MAX_FILENAME_SCORE_BONUS = 30  # Maximum bonus for shorter filenames in relevance scoring
-DEFAULT_SEARCH_RESULTS = 50  # Default number of search results to return
-DISPLAY_RESULTS_LIMIT = 20  # Maximum results to display in table
 
 # Relevance scoring weights (higher = more relevant)
 SCORE_EXACT_MATCH = 100  # Query exactly matches filename
@@ -174,106 +164,13 @@ class PathUtils:
         """Get simple item type string: 'folder' or 'file'"""
         return "folder" if path.is_dir() else "file"
 
-    @staticmethod
-    def get_item_emoji_type(path: Path) -> str:
-        """Get emoji item type string: '📁 Folder' or '📄 File'"""
-        return "📁 Folder" if path.is_dir() else "📄 File"
 
 
-class UIUtils:
-    """Terminal UI helpers for tables, menus, messages, and user input."""
 
-    @staticmethod
-    def create_results_table(title: str, columns: List[Tuple[str, str, int]]) -> Table:
-        """Create styled Rich table with title and columns (name, style, width). Width 0 = auto-size."""
-        table = Table(title=title, show_lines=True, header_style="bold cyan")
-        for name, style, width in columns:
-            if width:
-                table.add_column(name, style=style, width=width)
-            else:
-                table.add_column(name, style=style)
-        return table
-
-    @staticmethod
-    def get_user_choice(prompt: str, choices: List[str], default: Optional[str] = None) -> str:
-        """Get validated user input with automatic retry on invalid choices"""
-        if default:
-            return Prompt.ask(prompt, choices=choices, default=default)
-        else:
-            return Prompt.ask(prompt, choices=choices)
-
-    @staticmethod
-    def show_options_and_choose(options: List[str], prompt: str) -> str:
-        """Display numbered options and return validated user choice."""
-        for option in options:
-            console.print(option)
-
-        choices = [str(i) for i in range(1, len(options) + 1)]
-        return UIUtils.get_user_choice(prompt, choices)
-
-    @staticmethod
-    def print_success(message: str):
-        """Print success message with consistent formatting"""
-        console.print(f"[bold green]✅ SUCCESS:[/] {message}")
-
-    @staticmethod
-    def print_error(message: str):
-        """Print error message with consistent formatting"""
-        console.print(f"[bold red]❌ ERROR:[/] {message}")
-
-    @staticmethod
-    def print_warning(message: str):
-        """Print warning message with consistent formatting"""
-        console.print(f"[bold yellow]⚠️ WARNING:[/] {message}")
-
-    @staticmethod
-    def print_info(message: str):
-        """Print info message with consistent formatting"""
-        console.print(f"[bold cyan]ℹ️ INFO:[/] {message}")
-
-    @staticmethod
-    def print_separator():
-        """Print standard visual separator line"""
-        console.print("─" * 60)
-
-    @staticmethod
-    def print_section_break():
-        """Print section break line for major divisions"""
-        console.print("═" * 60)
-
-    @staticmethod
-    def print_section_header(title: str):
-        """Print formatted section header with consistent styling"""
-        console.print()
-        console.print(Panel(title, style="bold green"))
-        UIUtils.print_separator()
-
-    @staticmethod
-    def validate_filename_or_show_error(name: str) -> bool:
-        """Validate filename and print error if invalid. Returns True if valid."""
-        if not PathUtils.is_safe_filename(name):
-            UIUtils.print_error(
-                "Invalid name. Avoid empty names, '..' patterns, and special characters"
-            )
-            return False
-        return True
-
-    @staticmethod
-    def safe_execute(operation_name: str, func, *args, **kwargs) -> Any:
-        """Execute function with error handling. Catches file system errors."""
-        try:
-            return func(*args, **kwargs)
-        except PermissionError:
-            UIUtils.print_error(f"Permission denied: {operation_name}")
-        except FileNotFoundError:
-            UIUtils.print_error(f"File not found: {operation_name}")
-        except FileExistsError:
-            UIUtils.print_error(f"File already exists: {operation_name}")
-        except OSError as e:
-            UIUtils.print_error(f"{operation_name} - {e}")
-        return None
+# FILE SYSTEM WATCHER
 
 
+# FILE SYSTEM WATCHER
 
 # FILE SYSTEM WATCHER - Real-time index delta updates
 
@@ -478,16 +375,6 @@ class FileSearchIndex:
                 json.dump(self.access_counts, f)
         except OSError:
             pass  # History loss is acceptable; never crash on a write failure
-
-    def suggest_correction(self, query: str) -> Optional[str]:
-        """Return the closest filename in the index to query, or None if no good match."""
-        if not RAPIDFUZZ_AVAILABLE or not self.exact_match:
-            return None
-        candidates = list(self.exact_match.keys())
-        match = rf_process.extractOne(
-            query, candidates, scorer=rf_fuzz.WRatio, score_cutoff=60
-        )
-        return match[0] if match else None
 
     def index_folder(self, folder_path: Path) -> int:
         """Recursively index all files/folders in directory. Returns count of items indexed."""
@@ -701,11 +588,16 @@ class FileSearchIndex:
 
 
 
-# MAIN APPLICATION - Interactive file management interface
+# INDEX LIFECYCLE - Builds, caches and keeps the index current
 
 
 class FileCommander:
-    """Interactive file search application with Trie-based indexing and multi-strategy search."""
+    """Owns the index: builds or loads it, then keeps it current.
+
+    Progress goes to stdout with plain print. This used to be a Rich terminal
+    application; the launcher is the only front end now, and its console output
+    is a handful of startup lines, which is not worth a dependency.
+    """
 
     def __init__(self):
         self.search_index = FileSearchIndex()
@@ -718,26 +610,26 @@ class FileCommander:
     def load_or_build_index(self):
         """Load from SQLite cache if available, otherwise run full build and save cache."""
         if self.search_index.load_index(CACHE_DB_PATH):
-            UIUtils.print_success(
-                f"Index loaded from cache "
-                f"({self.search_index.total_items:,} items, <1s startup)"
+            print(
+                "Index loaded from cache (%s items)"
+                % format(self.search_index.total_items, ",")
             )
             self._index_built = True
             return
         # No cache — full indexing pass
         self._build_fresh_index()
-        console.print("[dim]💾 Saving index to cache for next startup...[/dim]")
+        print("Saving index to cache for next startup...")
         if self.search_index.save_index(CACHE_DB_PATH):
-            UIUtils.print_success("Cache saved — next startup will be instant")
+            print("Cache saved; next startup will be fast")
         else:
-            UIUtils.print_warning(
-                "Could not write the cache; searching still works, but the "
-                "next startup will re-index"
+            print(
+                "Warning: could not write the cache. Searching still works, "
+                "but the next startup will re-index"
             )
 
     def _build_fresh_index(self):
         """Full filesystem indexing pass (C: user folders + other drives complete)."""
-        console.print("[dim]📄 Indexing files using smart drive strategy...[/dim]")
+        print("Indexing. C: is limited to user folders, other drives are complete.")
 
         c_drive_folders = [
             Path.home() / "Downloads",
@@ -748,48 +640,33 @@ class FileCommander:
             Path.home() / "Pictures" / "Samsung Flow",
         ]
 
-        console.print("[dim]   🎯 C: drive - Indexing user folders only...[/dim]")
         for folder in c_drive_folders:
             if PathUtils.is_valid_folder(folder):
                 items_added = self.search_index.index_folder(folder)
                 if items_added > 0:
-                    console.print(
-                        f"[dim]      ✅ {folder.name}: {items_added} items[/dim]"
-                    )
+                    print("   %s: %d items" % (folder.name, items_added))
 
         drives = PathUtils.get_available_drives()
         other_drives = [drive for drive in drives if drive.upper() != "C"]
 
-        if other_drives:
-            console.print(
-                f"[dim]   💾 Other drives ({', '.join(other_drives)}) - Complete indexing...[/dim]"
+        for drive in other_drives:
+            items_added = self.search_index.index_folder(
+                PathUtils.get_drive_path(drive)
             )
-            for drive in other_drives:
-                drive_path = PathUtils.get_drive_path(drive)
-                console.print(
-                    f"[dim]      📂 Indexing {drive}: drive completely...[/dim]"
-                )
-                items_added = self.search_index.index_folder(drive_path)
-                if items_added > 0:
-                    console.print(
-                        f"[dim]      ✅ {drive}: drive: {items_added} items indexed[/dim]"
-                    )
-                else:
-                    console.print(
-                        f"[dim]      ⚠️ {drive}: drive: No accessible items[/dim]"
-                    )
-        else:
-            console.print("[dim]   ℹ️ No additional drives found besides C:[/dim]")
+            if items_added > 0:
+                print("   %s: drive: %d items" % (drive, items_added))
+            else:
+                print("   %s: drive: no accessible items" % drive)
 
-        UIUtils.print_success("Indexing complete")
+        print("Indexing complete: %s items" % format(self.search_index.total_items, ","))
         self._index_built = True
 
     def _start_watcher(self):
         """Start watchdog observer + writer thread for real-time index delta updates."""
         if not WATCHDOG_AVAILABLE:
-            UIUtils.print_warning(
-                "watchdog not installed — live index updates disabled. "
-                "Run: pip install watchdog"
+            print(
+                "Warning: watchdog is not installed, so live index updates are "
+                "disabled. Run: pip install watchdog"
             )
             return
 
@@ -921,370 +798,3 @@ class FileCommander:
                 pass  # Writer loop must never crash; stale entries filtered in search()
 
         conn.close()
-
-    def refresh_index(self):
-        """Wipe cache, stop watcher, rebuild index from scratch, restart watcher."""
-        UIUtils.print_section_header("🔄 Rebuilding Index")
-        self._stop_watcher()
-        self.search_index = FileSearchIndex()
-        self._index_built = False
-        self._stop_event = threading.Event()
-        self._event_queue = queue.Queue()
-        if CACHE_DB_PATH.exists():
-            CACHE_DB_PATH.unlink()
-        self.load_or_build_index()
-        self._start_watcher()
-
-    def show_main_menu(self):
-        """Display the main application menu with available operations."""
-        console.clear()
-
-        # Centered application header with gradient-style colors
-        title = Text()
-        title.append("⚡ ", style="bold yellow")
-        title.append("FILE COMMANDER", style="bold bright_cyan")
-
-        subtitle = Text("High-Performance File Search Engine", style="dim white")
-
-        # Create header panel with rounded borders
-        header_content = Text.assemble(
-            title, "\n", subtitle
-        )
-        header_content.justify = "center"
-
-        console.print()
-        console.print(
-            Panel(
-                header_content,
-                box=box.ROUNDED,
-                style="cyan",
-                padding=(1, 4),
-            ),
-            justify="center",
-        )
-        console.print()
-
-        # Main menu options
-        options = [
-            ("1", "⚡", "Search", "Find and manage files"),
-            ("2", "📊", "Statistics", "View search index status"),
-            ("3", "🔄", "Refresh Index", "Rebuild index from scratch"),
-            ("0", "❌", "Exit", "Close application"),
-        ]
-
-        # Create styled table with rounded box
-        table = Table(
-            box=box.ROUNDED,
-            show_header=True,
-            header_style="bold bright_cyan",
-            border_style="dim cyan",
-            padding=(0, 1),
-        )
-
-        table.add_column("", style="bold yellow", width=3, justify="center")
-        table.add_column("", width=3, justify="center")
-        table.add_column("Action", style="bold white", min_width=20)
-        table.add_column("Description", style="dim", min_width=25)
-
-        for key, icon, action, desc in options:
-            if key == "0":
-                table.add_row(
-                    f"[red]{key}[/red]",
-                    icon,
-                    f"[red]{action}[/red]",
-                    f"[dim red]{desc}[/dim red]",
-                )
-            else:
-                table.add_row(key, icon, action, desc)
-
-        # Use a grid to center the table robustly
-        grid = Table.grid(expand=True)
-        grid.add_column(justify="center")
-        grid.add_row(table)
-        console.print(grid)
-        console.print()
-
-    def search_files(self):
-        """Index drives (once), then continuous search loop. Actions: open, rename, search again."""
-        UIUtils.print_section_header("⚡ Search & Manage Files/Folders")
-
-        # Load from cache or build fresh index on first use
-        if not self._index_built:
-            self.load_or_build_index()
-            self._start_watcher()
-        else:
-            UIUtils.print_info("Using cached index (instant search ready)")
-
-        UIUtils.print_separator()
-
-        # Continuous search loop - no re-indexing needed
-        while True:
-            search_term = Prompt.ask("⚡ What are you looking for?")
-            if not search_term.strip():
-                UIUtils.print_error("Please enter a search term")
-                continue  # Ask again without breaking the loop
-
-            UIUtils.print_info(f"Searching for '{search_term}'...")
-
-            # Perform search with performance tracking
-            start_time = time.time()
-            results = self.search_index.search(search_term, DEFAULT_SEARCH_RESULTS)
-            search_time = time.time() - start_time
-
-            if results:
-                UIUtils.print_success(
-                    f"Found {len(results)} results in {search_time:.3f} seconds"
-                )
-                UIUtils.print_section_break()
-                self._display_search_results(results, search_term)
-
-                # Handle actions and check if user wants to continue
-                if not self._handle_search_actions(results):
-                    break  # Exit to main menu if user chose "Back to menu"
-            else:
-                UIUtils.print_section_break()
-                UIUtils.print_warning(f"No items found for '{search_term}'")
-                suggestion = self.search_index.suggest_correction(search_term)
-                if suggestion:
-                    UIUtils.print_info(f"Did you mean: [bold]{suggestion}[/bold]?")
-                UIUtils.print_section_break()
-
-                # Ask if user wants to continue searching (only when no results)
-                UIUtils.print_separator()
-                if not Confirm.ask(
-                    "[bold cyan]🔍 Do you want to search for something else?[/bold cyan]",
-                    default=False,
-                ):
-                    console.print("[dim]👍 Returning to main menu[/dim]")
-                    break  # Exit the search loop and return to main menu
-
-            UIUtils.print_separator()  # Visual separator for next search
-
-    def _display_search_results(self, results: List[Path], search_term: str):
-        """Display search results in a formatted table with file type indicators."""
-        UIUtils.print_separator()
-
-        table = UIUtils.create_results_table(
-            f"🔍 Results for '{search_term}'",
-            [
-                ("#", "white", 3),
-                ("Name", "green", 0),
-                ("Type", "white", 8),
-                ("Location", "blue", 0),
-            ],
-        )
-
-        # Show first results to avoid overwhelming the user
-        for i, item in enumerate(results[:DISPLAY_RESULTS_LIMIT], 1):
-            item_type = PathUtils.get_item_emoji_type(item)
-            table.add_row(str(i), item.name, item_type, str(item.parent))
-
-        console.print(table)
-
-        # Indicate if there are more results
-        if len(results) > DISPLAY_RESULTS_LIMIT:
-            console.print(
-                f"[dim]... and {len(results) - DISPLAY_RESULTS_LIMIT} more results (showing first {DISPLAY_RESULTS_LIMIT})[/dim]"
-            )
-
-        UIUtils.print_separator()
-
-    def _handle_search_actions(self, results: List[Path]) -> bool:
-        """Show action menu. Returns True to continue searching, False to exit to main menu."""
-        actions = [
-            "1. 📂 Open item",
-            "2. ✏️ Rename item",
-            "3. 🔍 Search again",
-            "4. 🔙 Back to menu",
-        ]
-
-        action = UIUtils.show_options_and_choose(actions, "Choose action")
-
-        if action in ["1", "2"]:
-            # Get user selection for the action
-            if len(results) == 1:
-                selected = results[0]
-            else:
-                choice = UIUtils.get_user_choice(
-                    "Enter number",
-                    [str(i) for i in range(1, min(len(results), DISPLAY_RESULTS_LIMIT) + 1)],
-                )
-                selected = results[int(choice) - 1]
-
-            # Perform the selected action
-            if action == "1":
-                self._open_item(selected)
-            else:
-                self._rename_item(selected)
-
-            return True  # Continue searching after open/rename
-        elif action == "3":
-            return True  # Continue search loop (no re-indexing!)
-        else:
-            return False  # Back to main menu
-
-    def _open_item(self, item_path: Path):
-        """Open file/folder with os.startfile (safe, no shell injection)."""
-
-        def open_operation():
-            # os.startfile works for both files and folders on Windows
-            os.startfile(str(item_path))
-            item_type = PathUtils.get_item_type(item_path)
-            UIUtils.print_success(f"Opened {item_type}: {item_path.name}")
-            self.search_index.record_access(item_path)
-
-        UIUtils.safe_execute("opening item", open_operation)
-
-    def _rename_item(self, item_path: Path):
-        """Rename file/folder with validation. Offers undo after successful rename."""
-        UIUtils.print_section_break()
-        console.print(Panel(f"✏️ Rename: {item_path.name}", style="bold cyan"))
-        UIUtils.print_section_break()
-
-        new_name = Prompt.ask("📝 Enter new name", default=item_path.name)
-
-        if new_name == item_path.name:
-            UIUtils.print_warning("Name unchanged")
-            return
-
-        # Security validation
-        if not UIUtils.validate_filename_or_show_error(new_name):
-            return
-
-        # Store original info for potential undo
-        original_path = item_path
-        original_name = item_path.name
-        new_path = item_path.parent / new_name
-
-        def rename_operation():
-            try:
-                original_path.rename(new_path)
-                item_type = PathUtils.get_item_type(new_path)
-                UIUtils.print_success(f"Renamed {item_type} to: {new_name}")
-                return True
-            except FileExistsError:
-                UIUtils.print_error(f"Name already exists: {new_name}")
-                return False
-
-        # Guard: ensure the resolved new path stays in the same directory.
-        # Catches any edge case where a name could slip out of the parent folder.
-        if new_path.parent.resolve() != item_path.parent.resolve():
-            UIUtils.print_error(
-                "Rename cannot move a file to a different directory. "
-                "Use a plain name without slashes."
-            )
-            return
-
-        # Perform rename operation
-        rename_successful = UIUtils.safe_execute("renaming item", rename_operation)
-
-        # If rename was successful, offer immediate undo option
-        if rename_successful:
-            UIUtils.print_separator()
-            if Confirm.ask(
-                "[bold cyan]🔄 Do you want to undo this rename?[/bold cyan]",
-                default=False,
-            ):
-
-                def undo_operation():
-                    new_path.rename(original_path)
-                    item_type = PathUtils.get_item_type(original_path)
-                    UIUtils.print_success(f"Restored original name: {original_name}")
-
-                UIUtils.safe_execute("undoing rename", undo_operation)
-            UIUtils.print_section_break()
-
-    def show_search_statistics(self):
-        """Display current search index statistics for user information."""
-        UIUtils.print_section_header("📊 Search Statistics")
-
-        table = UIUtils.create_results_table(
-            "⚡ Search System Status",
-            [("Metric", "cyan", 20), ("Value", "green", 20), ("Details", "dim", 40)],
-        )
-
-        # Cache file status
-        cache_exists = CACHE_DB_PATH.exists()
-        if cache_exists:
-            cache_size_kb = CACHE_DB_PATH.stat().st_size // 1024
-            cache_value = f"{cache_size_kb:,} KB"
-            cache_detail = str(CACHE_DB_PATH)
-        else:
-            cache_value = "Not found"
-            cache_detail = "Will be created on first search"
-
-        watcher_status = (
-            "✅ Running" if (self._observer and self._observer.is_alive())
-            else ("⚠️ Not available" if not WATCHDOG_AVAILABLE else "⏸ Not started")
-        )
-
-        table.add_row("Status", "✅ Ready", "Optimized for instant search")
-        table.add_row(
-            "Items Indexed",
-            f"{self.search_index.total_items:,}",
-            "Total files and folders in search index",
-        )
-        table.add_row("Search Speed", "< 1ms", "Microsecond-level performance")
-        table.add_row("Cache File", cache_value, cache_detail)
-        table.add_row("Live Watcher", watcher_status, "Real-time index delta updates")
-
-        console.print(table)
-        UIUtils.print_section_break()
-
-    def run_interactive(self):
-        """Main application loop. Shows menu and runs search or statistics based on user choice."""
-        while True:
-            try:
-                self.show_main_menu()
-
-                choice = UIUtils.get_user_choice(
-                    "Select option", ["0", "1", "2", "3"]
-                )
-
-                if choice == "0":
-                    UIUtils.print_section_break()
-                    console.print(
-                        "[bold yellow]👋 GOODBYE![/] Thank you for using File Commander"
-                    )
-                    UIUtils.print_section_break()
-                    self._stop_watcher()
-                    break
-                elif choice == "1":
-                    self.search_files()
-                elif choice == "2":
-                    self.show_search_statistics()
-                elif choice == "3":
-                    self.refresh_index()
-
-                # Pause before returning to menu (better UX)
-                if choice != "0":
-                    UIUtils.print_separator()
-                    Prompt.ask(
-                        "[dim]Press Enter to return to main menu[/dim]", default=""
-                    )
-                    UIUtils.print_separator()
-
-            except KeyboardInterrupt:
-                # Graceful handling of Ctrl+C
-                UIUtils.print_section_break()
-                console.print("[bold yellow]👋 GOODBYE![/] Interrupted by user")
-                UIUtils.print_section_break()
-                self._stop_watcher()
-                break
-            except Exception as e:
-                # Unexpected error handling
-                UIUtils.print_section_break()
-                UIUtils.print_error(f"Unexpected error: {e}")
-                console.print("[dim]Please try again or restart the application.[/dim]")
-                UIUtils.print_section_break()
-
-
-
-# APPLICATION ENTRY POINT
-
-if __name__ == "__main__":
-    # The floating overlay now lives in launcher/ui and is started by
-    # run_launcher.py. This file is the terminal application and the search
-    # engine behind it.
-    commander = FileCommander()
-    commander.run_interactive()

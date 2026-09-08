@@ -8,13 +8,13 @@ Search queries run with $O(m)$ prefix speed, where $m$ is the number of letters 
 
 - **Five Step Search System:** Looks for files using five methods in order: exact filename match, prefix tree lookup, word index search, substring scan, and optional typo correction.
     
-- **Fast Startup on Later Runs:** Saves index data to an SQLite database file at `~/.filefind_cache.db`. Starting the app later loads over $124{,}000$ files in under $400$ milliseconds, skipping the long $10$ to $60$ second folder scan completely.
+- **Fast Startup on Later Runs:** Saves index data to an SQLite database file at `~/.filefind_cache.db`. Measured on the development machine, a later start rebuilds the whole index of $39{,}930$ files from that cache in $0.71$ seconds, against $19.5$ seconds to crawl the same folders from disk.
     
 - **Live Background Updates:** A background file listener monitors your folders and sends file creation, deletion, and rename events to a background worker thread using a safe queue.
     
 - **Application Launcher:** Finds installed programs from three places Windows uses: Start Menu shortcuts, the Windows registry `App Paths` key, and programs located in your system `PATH`. Short name matching also lets you find tools quickly, such as typing `vsc` to find Visual Studio Code.
     
-- **Floating Search Window:** A quick launcher mode keeps the index ready in memory. Pressing `Ctrl+Shift+F` opens a clean, borderless search window right on top of your screen, letting you find files without leaving your active work.
+- **Floating Search Window:** A quick launcher mode keeps the index ready in memory. Pressing `Ctrl+Shift+F` opens a clean, borderless search window right on top of your screen, letting you find files without leaving your active work. Drag it anywhere, scale the whole interface to suit your display, and it reopens where you left it.
     
 - **Modular Search Connectors:** The search system uses simple plug in connectors. Files, installed apps, and future search sources combine into one sorted results list. If you type new letters, earlier background searches cancel immediately so your computer stays fast.
     
@@ -167,15 +167,28 @@ Because the index is already loaded in computer memory, opening the search box i
 
 #### Window Controls
 
-- **Type:** Results update live as you type, showing up to $8$ ranked matches.
+- **Type:** Results update live as you type. The window shows $5$ rows at a time and scrolls through up to $20$ ranked matches.
     
-- **Up and Down arrows:** Move through the results list.
+- **Up and Down arrows:** Move through the results list. The selection wraps around, so holding an arrow key cycles through everything.
     
 - **Enter:** Opens the selected file or program.
     
-- **Double click:** Opens the clicked file or program directly.
+- **`Alt+1` to `Alt+9`:** Opens that numbered row directly, without arrowing down to it. Each row shows its own shortcut on the right.
     
-- **Escape:** Hides the search window without closing the app.
+- **Click:** Opens the clicked file or program directly.
+    
+- **Escape or `Ctrl+Shift+F`:** Hides the search window without closing the app.
+    
+
+#### Moving and Resizing the Window
+
+- **Drag the search bar** to move the window anywhere on screen. Pressing on typed text still selects it, so only empty bar space starts a drag.
+    
+- **Drag the grip** at the right end of the search bar to resize. The whole interface scales together, text, rows and icons included, between $0.7\times$ and $2.0\times$. Double click the grip to return to normal size.
+    
+- The position and scale are remembered in `~/.filefind_launcher.json`, so the window reopens where you left it, including after a restart.
+    
+- **Clicking another window does not hide the launcher.** It stays open with whatever you typed still in it. This is deliberate: losing a half typed search to a stray click costs more than tidying itself away is worth. Hiding is always `Escape`, the hotkey, or opening a result.
     
 
 Launcher mode uses `PySide6-Essentials` to draw the window and `keyboard` for the shortcut key. If the shortcut cannot register, the window still opens on launch, and the terminal tool continues to work normally.
@@ -190,13 +203,14 @@ FileFind/
 │   ├── models.py         Data types for queries and results
 │   ├── handler.py        Plug in rules and search cancellation
 │   ├── dispatcher.py     Runs search providers and ranks final results
+│   ├── matcher.py        Shared scoring, so apps and files rank on one scale
 │   ├── handlers/         Search provider connectors
 │   │   ├── apps.py       Installed Windows application search
 │   │   └── files.py      File search wrapping FileFind.py
 │   └── ui/               Qt graphical window interface
-│       ├── overlay.py    Floating window and query handling
+│       ├── overlay.py    Floating window, moving, scaling, query handling
 │       ├── result_view.py Row drawing and file icons
-│       └── theme.py      Size metrics and color themes
+│       └── theme.py      Size metrics, interface scale, color themes
 ├── tests/                Pytest automated test suite
 ├── requirements.txt      Project package dependencies
 └── .github/workflows/    Automated test configuration
@@ -231,7 +245,7 @@ FileFind never builds command text strings from filenames, which prevents unusua
 
 ## Automated Testing
 
-FileFind includes unit tests managed through pytest. Currently, all **7 tests** pass cleanly.
+FileFind includes unit tests managed through pytest. Currently, all **65 tests** pass cleanly.
 
 ### Running Tests
 
@@ -249,18 +263,20 @@ pytest --cov=FileFind
 
 ### What the Tests Check
 
-- **Path Safety** (`test_path_utils.py`, 3 tests): Verifies safe filename checks, folder escape prevention, illegal Windows character blocking, reserved system name blocking, end of line space rules, name length limits, and drive letter detection.
+- **Path Safety** (`test_path_utils.py`, 7 tests): Verifies safe filename checks, folder escape prevention, illegal Windows character blocking, reserved system name blocking, end of line space rules, name length limits, and drive letter detection.
     
-- **Prefix Tree Operations** (`test_search.py`, 2 tests): Verifies character branches, prefix searches, preventing unrelated matches, and uppercase or lowercase matching.
+- **Search Engine** (`test_search.py`, 14 tests): Verifies character branches, prefix searches, uppercase or lowercase matching, short name tokens, and that files added to the index are found by search words.
     
-- **Index Searching** (`test_search.py`, 2 tests): Verifies that files added to the index are found by search words and that multiple matching files are returned.
+- **Launcher** (`test_launcher.py`, 44 tests): Verifies query parsing, keyword routing, search cancellation, one failing connector not breaking the rest, the ranking that keeps applications above similarly named files, and the graphical window itself, including the global shortcut arriving from another thread, `Alt+1` to `Alt+9`, window sizing, interface scaling, moving and remembering position, and the icon cache.
     
-- **Isolated Temporary Folders:** Tests use pytest `tmp_path` helpers so they only read and write inside temporary test folders.
+- **Isolated Temporary Folders:** Tests use pytest `tmp_path` helpers so they only read and write inside temporary test folders. The launcher's saved position is redirected there too, so a test run cannot move your real window.
     
+
+Regression tests are checked by reintroducing the defect and confirming the test fails, not only by watching it pass.
 
 ### Areas for Future Tests
 
-Current tests cover the search core and path safety rules. Future tests can be added for:
+Current tests cover the search core, path safety, the connector system and most of the window. Future tests can be added for:
 
 - Saving and loading the SQLite database file
     
@@ -268,7 +284,7 @@ Current tests cover the search core and path safety rules. Future tests can be a
     
 - The background file worker thread
     
-- The graphical search window and row drawing
+- Row drawing inside the results list
     
 - Typo matching and spelling suggestions
     

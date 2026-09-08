@@ -1,6 +1,6 @@
 # FileFind
 
-FileFind is a fast local file search tool and explorer for Windows. It replaces slow and unpredictable system search with fast in memory search trees, word indexes, a saved SQLite database cache, and a background watcher that tracks file changes instantly.
+FileFind is a fast local file search tool and application launcher for Windows. It replaces slow and unpredictable system search with fast in memory search trees, word indexes, a saved SQLite database cache, and a background watcher that tracks file changes instantly.
 
 Search queries run with $O(m)$ prefix speed, where $m$ is the number of letters in your search word. This means searching takes the same small fraction of time whether you have ten files or a hundred thousand files on your computer.
 
@@ -10,9 +10,9 @@ Search queries run with $O(m)$ prefix speed, where $m$ is the number of letters 
     
 - **Fast Startup on Later Runs:** Saves index data to an SQLite database file at `~/.filefind_cache.db`. Measured on the development machine, a later start rebuilds the whole index of $39{,}930$ files from that cache in $0.71$ seconds, against $19.5$ seconds to crawl the same folders from disk.
     
-- **Live Background Updates:** A background file listener monitors your folders and sends file creation, deletion, and rename events to a worker thread through a safe queue. The worker applies them in batches under a single database commit, which measured $74{,}835$ events per second: a burst of 15,000 new files is absorbed in $0.2$ seconds rather than leaving results stale while it catches up.
+- **Live Background Updates:** A background file listener monitors your folders and sends file creation, deletion, and rename events to a worker thread through a safe queue. The worker applies them in batches under a single database commit, which measured $74{,}835$ events per second: a burst of $15{,}000$ new files is absorbed in $0.2$ seconds rather than leaving results stale while it catches up.
     
-- **Application Launcher:** Finds installed programs from four places Windows uses: Start Menu shortcuts, the registry `App Paths` key, your system `PATH`, and the Store app list. Store programs such as Calculator, Photos and Terminal have no executable on disk, so they are fetched separately and cached, keeping them out of the startup path. Short name matching also lets you find tools quickly, such as typing `vsc` to find Visual Studio Code.
+- **Application Launcher:** Finds installed programs from four places Windows uses: Start Menu shortcuts, the registry `App Paths` key, your system `PATH`, and the Store app list. Store programs such as Calculator, Photos and Terminal have no executable on disk. Windows will only list them through PowerShell, which takes over a second, so the answer is cached in `~/.filefind_apps.json` and refreshed in the background rather than delaying every startup. Their icons have no file to come from either, and are fetched through the shell instead. Short name matching also lets you find tools quickly, such as typing `vsc` to find Visual Studio Code.
     
 - **Floating Search Window:** A quick launcher mode keeps the index ready in memory. Pressing `Ctrl+Shift+F` opens a clean, borderless search window right on top of your screen, letting you find files without leaving your active work. Drag it anywhere, scale the whole interface to suit your display, and it reopens where you left it.
     
@@ -232,26 +232,20 @@ pytest --cov=FileFind --cov=launcher
     
 - **Launcher** (`test_launcher.py`, 50 tests): Verifies query parsing, keyword routing, search cancellation, one failing connector not breaking the rest, the ranking that keeps applications above similarly named files, and the graphical window itself, including the global shortcut arriving from another thread, `Alt+1` to `Alt+9`, window sizing, interface scaling, moving and remembering position, and the icon cache.
     
-- **Isolated Temporary Folders:** Tests use pytest `tmp_path` helpers so they only read and write inside temporary test folders. The launcher's saved position is redirected there too, so a test run cannot move your real window.
+- **Isolated Temporary Folders:** Tests use pytest `tmp_path` helpers so they only read and write inside temporary test folders. The window's saved position and the Store application cache are redirected there too, so a test run cannot move your real window or reach for PowerShell.
     
 
 Regression tests are checked by reintroducing the defect and confirming the test fails, not only by watching it pass.
 
 ### Areas for Future Tests
 
-Current tests cover the search core, path safety, the connector system and most of the window. Future tests can be added for:
+Current tests cover the search core, path safety, the SQLite cache, the background writer, the connector system and most of the window. Future tests can be added for:
 
-- Saving and loading the SQLite database file
+- Row drawing itself. The paint path is tested for what it must not do, such as touching the disk, but not for what it puts on screen
     
-- Removing files and clearing old search tree links
+- Fuzzy matching, the fifth search strategy
     
-- The background file worker thread
-    
-- Row drawing inside the results list
-    
-- Typo matching and spelling suggestions
-    
-- Verifying exact rank order for files opened multiple times
+- Exact rank order for files opened many times, rather than only that they are found
     
 
 ## Automated Continuous Integration

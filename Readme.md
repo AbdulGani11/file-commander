@@ -155,8 +155,9 @@ After picking a search result number, you can:
 Run FileFind as a background launcher with a global hotkey and a graphical pop up window:
 
 ```
-python run_launcher.py                  # Scans this project folder only (fast for testing)
-python run_launcher.py --full           # Scans standard user folders
+python run_launcher.py                  # Normal use: cached index and live watcher
+python run_launcher.py --rebuild        # Discard the cache and scan from disk again
+python run_launcher.py --repo           # Scan this project folder only (fast for testing)
 python run_launcher.py --theme Light    # Pick a color theme: Dark, Darker, or Light
 ```
 

@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
 )
 
+from .shell_icon import is_shell_path, pixmap_for_shell_path
 from .theme import Theme
 
 # Payload role holding the Result object for a row.
@@ -70,6 +71,11 @@ PER_FILE_SUFFIXES = {".exe", ".lnk", ".url", ".ico", ".cpl", ".msc", ".scr"}
 
 def _icon_identity(path: str, kind: str) -> str:
     """What two rows must have in common to share one rendered icon."""
+    if is_shell_path(path):
+        # Never share these. A shell identifier has no file extension, and
+        # splitting one produces nonsense: everything after the last dot in
+        # Microsoft.WindowsCalculator_8wekyb3d8bbwe!App would become the "type".
+        return path
     if kind == "folder":
         return "<folder>"
     suffix = os.path.splitext(path)[1].lower()
@@ -122,14 +128,19 @@ def _extract_pixmap(key, path: str = "") -> QPixmap:
     identity, size, ratio = key
     path = path or identity                  # identity is the path, when unshared
     try:
-        if _ICON_PROVIDER is None:
-            _ICON_PROVIDER = QFileIconProvider()
-        icon = _ICON_PROVIDER.icon(QFileInfo(path))
-        try:
-            pixmap = icon.pixmap(QSize(size, size), ratio)
-        except TypeError:
-            # Older bindings have no device-pixel-ratio overload
-            pixmap = icon.pixmap(QSize(size, size))
+        if is_shell_path(path):
+            # A Store app has no file to read an icon from; the shell knows it
+            # by identifier instead.
+            pixmap = pixmap_for_shell_path(path, size)
+        else:
+            if _ICON_PROVIDER is None:
+                _ICON_PROVIDER = QFileIconProvider()
+            icon = _ICON_PROVIDER.icon(QFileInfo(path))
+            try:
+                pixmap = icon.pixmap(QSize(size, size), ratio)
+            except TypeError:
+                # Older bindings have no device-pixel-ratio overload
+                pixmap = icon.pixmap(QSize(size, size))
     except Exception:
         pixmap = QPixmap()
 
@@ -330,7 +341,9 @@ class ResultDelegate(QStyledItemDelegate):
         path = result.context.get("path") if result.context else None
         if path is not None:
             ratio = painter.device().devicePixelRatio()
-            text = str(path)
+            # A Store app names what its icon should be looked up by, because
+            # its "path" is an identifier with no file behind it.
+            text = str(result.context.get("icon_target") or path)
             key = _icon_key(text, rect.width(), ratio, result.icon or "")
             pixmap = _cached_pixmap(key)
 

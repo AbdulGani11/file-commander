@@ -173,6 +173,7 @@ FileFind/
 │   └── ui/               Qt graphical window interface
 │       ├── overlay.py    Floating window, moving, scaling, query handling
 │       ├── result_view.py Row drawing and file icons
+│       ├── shell_icon.py  Icons for Store apps, which have no file on disk
 │       └── theme.py      Size metrics, interface scale, color themes
 ├── tests/                Pytest automated test suite
 ├── requirements.txt      Project package dependencies
@@ -207,7 +208,7 @@ The strongest protection is what the program does not do. Renaming files, and th
 
 ## Automated Testing
 
-FileFind includes unit tests managed through pytest. Currently, all **73 tests** pass cleanly.
+FileFind includes unit tests managed through pytest. Currently, all **75 tests** pass cleanly.
 
 ### Running Tests
 
@@ -229,7 +230,7 @@ pytest --cov=FileFind --cov=launcher
     
 - **Search Engine** (`test_search.py`, 18 tests): Verifies character branches, prefix searches, uppercase or lowercase matching, short name tokens, and that files added to the index are found by search words.
     
-- **Launcher** (`test_launcher.py`, 48 tests): Verifies query parsing, keyword routing, search cancellation, one failing connector not breaking the rest, the ranking that keeps applications above similarly named files, and the graphical window itself, including the global shortcut arriving from another thread, `Alt+1` to `Alt+9`, window sizing, interface scaling, moving and remembering position, and the icon cache.
+- **Launcher** (`test_launcher.py`, 50 tests): Verifies query parsing, keyword routing, search cancellation, one failing connector not breaking the rest, the ranking that keeps applications above similarly named files, and the graphical window itself, including the global shortcut arriving from another thread, `Alt+1` to `Alt+9`, window sizing, interface scaling, moving and remembering position, and the icon cache.
     
 - **Isolated Temporary Folders:** Tests use pytest `tmp_path` helpers so they only read and write inside temporary test folders. The launcher's saved position is redirected there too, so a test run cannot move your real window.
     

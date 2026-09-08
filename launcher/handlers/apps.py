@@ -352,7 +352,14 @@ class AppPlugin(BasePlugin):
                     score=score,
                     action=self._make_launch_action(app),
                     icon="app",
-                    context={"path": app.target, "app_source": app.source},
+                    context={
+                        "path": app.target,
+                        "app_source": app.source,
+                        # What the icon should be looked up by. For a Store app
+                        # that is the shell identifier, because there is no file
+                        # on disk whose icon could be read.
+                        "icon_target": self._launch_target(app),
+                    },
                 )
             )
 

@@ -673,6 +673,49 @@ ROWS = [
 ]
 
 
+def test_shell_icon_lookup_fails_quietly_and_frees_its_handles():
+    """A bad shell identifier must give a null pixmap, never an exception.
+
+    Every extraction takes an icon handle and two bitmap handles from Windows.
+    Releasing them matters more here than in a short lived script, because the
+    launcher is meant to run all day and Part 2 of the guide watches the handle
+    count for exactly this.
+    """
+    import ctypes
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui.shell_icon import is_shell_path, pixmap_for_shell_path
+
+    QApplication.instance() or QApplication([])
+
+    assert is_shell_path("shell:AppsFolder\\Thing_x!App")
+    assert not is_shell_path(r"C:\Windows\notepad.exe")
+
+    # Nonsense identifiers must come back empty rather than raising
+    for junk in ("shell:AppsFolder\\NoSuchApp_0000000000000!App",
+                 "shell:CompletelyMadeUpNamespace",
+                 "shell:"):
+        assert pixmap_for_shell_path(junk, 32).isNull(), junk
+
+    # Repeating a failing lookup must not accumulate GDI objects
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    proc = ctypes.c_void_p(kernel32.GetCurrentProcess())
+    before = user32.GetGuiResources(proc, 0)          # GR_GDIOBJECTS
+    for _ in range(50):
+        pixmap_for_shell_path("shell:AppsFolder\\NoSuchApp_0000000000000!App", 32)
+    after = user32.GetGuiResources(proc, 0)
+
+    assert after - before <= 10, (
+        "failed shell icon lookups leaked %d GDI objects" % (after - before)
+    )
+
+
 def test_store_rows_become_apps_but_plain_executables_do_not():
     """Only Store entries are taken from the Start Menu app list.
 
@@ -691,6 +734,53 @@ def test_store_rows_become_apps_but_plain_executables_do_not():
     # Nothing to iterate is not an error
     assert list(AppPlugin._store_apps([])) == []
     assert list(AppPlugin._store_apps(None)) == []
+
+
+def test_store_apps_get_their_icon_from_the_shell_not_a_file():
+    """A Store app's icon cannot be read from its path, because it has none.
+
+    Regression guard: the plugin handed QFileIconProvider an identifier like
+    Microsoft.WindowsCalculator_8wekyb3d8bbwe!App. There is no file behind
+    that, so every Store row drew the blank document placeholder: 5 distinct
+    colours against 138 for the real Calculator artwork.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.handlers.apps import AppEntry, AppPlugin
+    from launcher.ui.result_view import _icon_identity
+    from launcher.ui.shell_icon import is_shell_path
+
+    QApplication.instance() or QApplication([])
+
+    store = AppEntry("Calculator", Path("Microsoft.WindowsCalculator_x!App"), "Store")
+    target = AppPlugin._launch_target(store)
+
+    assert is_shell_path(target), "the icon must be looked up through the shell"
+
+    # A shell identifier has no file extension. Splitting one on its last dot
+    # would make every app of the same publisher share a single icon.
+    identity = _icon_identity(target, "app")
+    assert identity == target, "a shell identifier must never be shared by type"
+    assert not identity.startswith("<type>")
+
+    # The same trap with the kind missing, which is how it would slip through
+    assert _icon_identity(target, "") == target
+
+    # The plugin has to hand that lookup string to the view, or the view falls
+    # back to the identifier and draws the placeholder again.
+    plugin = AppPlugin(refresh_store=False)
+    plugin._apps = [store]
+    results = plugin.query(Query.parse("calculator", set()), CancellationToken())
+
+    assert results, "the stub app was not matched"
+    assert results[0].context.get("icon_target") == target, (
+        "the plugin must name what the icon is looked up by"
+    )
 
 
 def test_store_apps_launch_through_the_shell_not_the_filesystem():

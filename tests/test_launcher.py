@@ -378,3 +378,50 @@ def test_path_scan_skips_project_tooling_but_keeps_system32():
     assert not skipped(r"C:\WINDOWS\system32")
     assert not skipped(r"C:\WINDOWS")
     assert not skipped(r"C:\Program Files\Git\usr\bin")
+
+
+# Overlay hotkey path (first coverage of launcher/ui)
+
+
+def test_hotkey_signal_toggles_window_from_another_thread():
+    """The global hotkey fires on its own thread and must still reach the UI.
+
+    Regression guard: the hotkey used QTimer.singleShot, but a timer belongs to
+    the thread that created it, and the keyboard library's thread runs no Qt
+    event loop, so the call was never delivered. Pressing the hotkey did
+    nothing. A Qt signal queues onto the receiving thread instead.
+    """
+    import os
+    import threading
+    import time
+
+    pytest.importorskip("PySide6")
+    # No real display needed, and none is guaranteed on a CI runner
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    def pump(seconds=1.5):
+        end = time.time() + seconds
+        while time.time() < end:
+            app.processEvents()
+            time.sleep(0.01)
+
+    try:
+        assert not overlay.isVisible(), "overlay must start hidden"
+
+        # Emit from a plain thread, exactly as the keyboard library does
+        threading.Thread(target=overlay.hotkey_pressed.emit, daemon=True).start()
+        pump()
+        assert overlay.isVisible(), "hotkey did not open the window"
+
+        threading.Thread(target=overlay.hotkey_pressed.emit, daemon=True).start()
+        pump()
+        assert not overlay.isVisible(), "second press did not hide the window"
+    finally:
+        overlay.close()

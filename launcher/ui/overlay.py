@@ -61,6 +61,12 @@ class LauncherOverlay(QWidget):
 
     request_query = Signal(int, str)
 
+    # Emitted from the global hotkey thread. A Qt signal is the only safe way
+    # to reach the UI from another thread: it queues the call onto the Qt event
+    # loop. QTimer.singleShot does not work here, because a timer belongs to
+    # the thread that created it and the hotkey thread runs no event loop.
+    hotkey_pressed = Signal()
+
     def __init__(self, dispatcher: Dispatcher, theme_name: str = DEFAULT_THEME):
         super().__init__()
         self._dispatcher = dispatcher
@@ -72,6 +78,9 @@ class LauncherOverlay(QWidget):
         self._build_ui()
         self._start_worker()
         self.apply_theme(self.theme)
+
+        # Queued automatically, because emitter and receiver are on different threads
+        self.hotkey_pressed.connect(self.toggle)
 
     # construction
 

@@ -9,6 +9,7 @@ Press Ctrl+Shift+F to toggle the overlay, Esc to hide, Enter to open.
 """
 
 import importlib.util
+import signal
 import sys
 from pathlib import Path
 
@@ -68,21 +69,39 @@ def main() -> int:
 
     overlay = LauncherOverlay(dispatcher, theme_name)
 
+    # Ctrl+C in the terminal. Qt's event loop blocks inside C++, so Python
+    # never gets a chance to run its signal handler. The repeating timer hands
+    # control back to the interpreter often enough for the handler to fire.
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    interrupt_timer = QTimer()
+    interrupt_timer.start(200)
+    interrupt_timer.timeout.connect(lambda: None)
+
+    hotkey_ready = False
     try:
         import keyboard
 
-        # keyboard fires on its own thread; singleShot(0) marshals the call
-        # back onto the Qt event loop, which is the only thread allowed to
-        # touch widgets.
-        keyboard.add_hotkey(
-            HOTKEY, lambda: QTimer.singleShot(0, overlay.toggle), suppress=False
-        )
-        print("Press %s to toggle the overlay. Ctrl+C here to quit." % HOTKEY.upper())
+        # suppress=True consumes the keystroke so it does not also reach the
+        # focused application. Without it, Ctrl+Shift+F still triggers Find in
+        # Files in VS Code while the overlay opens behind it.
+        keyboard.add_hotkey(HOTKEY, overlay.hotkey_pressed.emit, suppress=True)
+        hotkey_ready = True
+        print("Press %s to open the overlay. Ctrl+C here to quit." % HOTKEY.upper())
     except Exception as exc:
-        print("Global hotkey unavailable (%s); showing overlay directly." % exc)
+        print("Global hotkey unavailable (%s)." % exc)
 
-    overlay.show_overlay()
-    return app.exec()
+    if not hotkey_ready:
+        # Without a hotkey there is no other way to reach the window
+        overlay.show_overlay()
+
+    try:
+        return app.exec()
+    finally:
+        try:
+            import keyboard
+            keyboard.unhook_all()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

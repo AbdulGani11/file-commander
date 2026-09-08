@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QObject,
     QPoint,
     QPropertyAnimation,
@@ -27,6 +28,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QFontMetrics,
     QGuiApplication,
     QKeyEvent,
     QKeySequence,
@@ -55,13 +57,19 @@ SHADOW_PAD = 24
 # never worth interrupting the user for.
 SETTINGS_PATH = Path.home() / ".filefind_launcher.json"
 
-# The shadow margin is the only part of the window no child widget occupies, so
-# it is where dragging can be picked up without fighting the query box for text
-# selection or the result list for row clicks.
-GRIP = SHADOW_PAD
+# Side of the scale handle drawn at the right of the query bar.
+#
+# It is a real child widget on painted pixels, not a zone of the shadow padding.
+# The first attempt put the resize zone in that padding and nobody could find
+# it: the padding is invisible, so there is nothing to aim at. (It does mostly
+# receive clicks -- only its outermost pixels, where the shadow's alpha reaches
+# zero, fall through to the window behind -- but being hittable is not the same
+# as being discoverable, and only the second one was the problem.)
+GRIP_SIZE = 22
 
-# Size of the bottom-right square that scales instead of moves.
-RESIZE_GRIP = SHADOW_PAD + 10
+# How far the pointer must travel inside the query box before the press is
+# treated as dragging the window rather than placing the caret.
+DRAG_THRESHOLD = 4
 
 
 class QueryWorker(QObject):
@@ -80,6 +88,60 @@ class QueryWorker(QObject):
         except Exception:
             results = []
         self.finished.emit(seq, results)
+
+
+class ScaleGrip(QWidget):
+    """The visible handle at the right of the query bar that scales the window.
+
+    A child widget, not a region of the parent's paint, for two reasons: it is
+    opaque so Windows will deliver clicks to it, and it gives the user
+    something to see. The previous version put the resize zone in the
+    transparent shadow padding, where it was both invisible and unclickable.
+    """
+
+    def __init__(self, overlay: "LauncherOverlay"):
+        super().__init__(overlay.root)
+        self._overlay = overlay
+        self.setFixedSize(GRIP_SIZE, GRIP_SIZE)
+        self.setCursor(Qt.SizeFDiagCursor)
+        self.setToolTip("Drag to resize; double-click to reset")
+        self._origin = QPoint()
+        self._start_scale = DEFAULT_SCALE
+        self._dragging = False
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(QColor(self._overlay.theme.c("hotkey_fg")), 1.4))
+
+        # Three stepped diagonals, the usual grip shorthand
+        span = GRIP_SIZE - 8
+        for offset in (0, 5, 10):
+            painter.drawLine(4 + offset, span, span, 4 + offset)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            return
+        self._dragging = True
+        self._origin = event.globalPosition().toPoint()
+        self._start_scale = self._overlay.theme.scale
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._dragging:
+            return
+        delta = event.globalPosition().toPoint().x() - self._origin.x()
+        base = max(1, self._overlay.width())
+        self._overlay.set_scale(self._start_scale * (base + delta * 2) / base)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._dragging:
+            self._dragging = False
+            self._overlay._save_settings()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """Back to 1.0, since a badly scaled window is awkward to drag back."""
+        self._overlay.set_scale(DEFAULT_SCALE)
+        self._overlay._save_settings()
 
 
 class LauncherOverlay(QWidget):
@@ -109,11 +171,12 @@ class LauncherOverlay(QWidget):
         self._settings = self._load_settings()
         self.theme = Theme(theme_name, self._settings.get("scale", DEFAULT_SCALE))
 
-        # Drag state. _drag_mode is None, "move" or "scale".
+        # Window-move state. _drag_mode is None, "armed" once the bar is pressed
+        # somewhere draggable, then "move" once the pointer has actually
+        # travelled. Scaling keeps its own state inside ScaleGrip.
         self._drag_mode: Optional[str] = None
         self._drag_origin = QPoint()
         self._drag_window_pos = QPoint()
-        self._drag_start_scale = DEFAULT_SCALE
 
         # Hiding is explicit: Escape, the hotkey, or opening a result. Anything
         # else that hides this window is undone; see hideEvent.
@@ -205,6 +268,16 @@ class LauncherOverlay(QWidget):
         self.result_list.itemClicked.connect(lambda _: self._activate())
         stack.addWidget(self.result_list)
 
+        # Visible scale handle, floated over the right end of the query bar in
+        # the padding the stylesheet already reserves there.
+        self.grip = ScaleGrip(self)
+
+        # Flow Launcher hangs MouseDown on the whole window border and calls
+        # DragMove (MainWindow.xaml:217). The equivalent surface here is the
+        # query bar, which is the only chrome always on screen, so the filter
+        # below turns a press-and-drag there into a window move.
+        self.query_box.installEventFilter(self)
+
         self._anim = QPropertyAnimation(self, b"windowOpacity", self)
         self._anim.setDuration(self.theme.m("animation_ms"))
         # CircleEase / EaseInOut in MainWindow.xaml.cs
@@ -232,6 +305,19 @@ class LauncherOverlay(QWidget):
         # the text and icons but leaves the rows their old height.
         self.result_list.doItemsLayout()
         self._resize_to_results()
+        self._place_grip()
+
+    def _place_grip(self) -> None:
+        """Sit the scale handle at the right of the query bar, on top of it."""
+        if not hasattr(self, "grip"):
+            return
+        query_height = self.theme.m("query_height")
+        self.grip.move(
+            self.root.width() - GRIP_SIZE - self.theme.m("hotkey_margin_right"),
+            max(0, (query_height - GRIP_SIZE) // 2),
+        )
+        self.grip.raise_()          # above the query box, which fills the row
+        self.grip.update()          # its pen colour follows the theme
 
     # query flow
 
@@ -320,6 +406,7 @@ class LauncherOverlay(QWidget):
             + list_height
         )
         self.setFixedHeight(height)
+        self._place_grip()
 
     # interaction
 
@@ -375,65 +462,51 @@ class LauncherOverlay(QWidget):
 
     # moving and scaling
 
-    def _zone_at(self, pos: QPoint) -> Optional[str]:
-        """Which drag zone a point falls in, or None for the window contents.
+    def _is_on_text(self, pos: QPoint) -> bool:
+        """True if a point in the query box sits on typed text.
 
-        Only the shadow margin qualifies. It is the one region no child widget
-        covers, so picking drags up there costs the query box no text selection
-        and the result list no clicks.
+        Dragging over text has to keep selecting it. Everywhere else in the bar
+        is free to move the window, which for an empty box is the whole width.
         """
-        rect = self.rect()
-        body = rect.adjusted(GRIP, GRIP, -GRIP, -GRIP)
-        if body.contains(pos):
-            return None
+        text = self.query_box.text()
+        if not text:
+            return False
+        metrics = QFontMetrics(self.query_box.font())
+        left = self.query_box.contentsRect().left()
+        return pos.x() <= left + metrics.horizontalAdvance(text) + 4
 
-        near_right = pos.x() >= rect.right() - RESIZE_GRIP
-        near_bottom = pos.y() >= rect.bottom() - RESIZE_GRIP
-        if near_right and near_bottom:
-            return "scale"
-        return "move"
+    def eventFilter(self, watched, event):
+        """Turn a press-and-drag on the query bar into a window move."""
+        if watched is not self.query_box:
+            return super().eventFilter(watched, event)
 
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_mode == "move":
-            delta = event.globalPosition().toPoint() - self._drag_origin
-            self.move(self._drag_window_pos + delta)
-            return
+        kind = event.type()
 
-        if self._drag_mode == "scale":
-            # Horizontal travel drives the scale, so the window grows away from
-            # its top-left corner and does not walk across the screen.
-            delta = event.globalPosition().toPoint().x() - self._drag_origin.x()
-            base = max(1, self.width())
-            self.set_scale(self._drag_start_scale * (base + delta * 2) / base)
-            return
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+            if not self._is_on_text(event.position().toPoint()):
+                self._drag_origin = event.globalPosition().toPoint()
+                self._drag_window_pos = self.pos()
+                self._drag_mode = "armed"       # not moving until it travels
+            return False                        # let the caret land as usual
 
-        # Not dragging: let the cursor advertise what each edge does
-        zone = self._zone_at(event.position().toPoint())
-        if zone == "scale":
-            self.setCursor(Qt.SizeFDiagCursor)
-        elif zone == "move":
-            self.setCursor(Qt.SizeAllCursor)
-        else:
-            self.unsetCursor()
+        if kind == QEvent.Type.MouseMove and self._drag_mode:
+            travelled = event.globalPosition().toPoint() - self._drag_origin
+            if self._drag_mode == "armed":
+                if travelled.manhattanLength() < DRAG_THRESHOLD:
+                    return False                # still just a click
+                self._drag_mode = "move"
+            self.move(self._drag_window_pos + travelled)
+            return True                         # consumed: no text selection
 
-    def mousePressEvent(self, event) -> None:
-        if event.button() != Qt.LeftButton:
-            return
-        zone = self._zone_at(event.position().toPoint())
-        if zone is None:
-            return
-        self._drag_mode = zone
-        self._drag_origin = event.globalPosition().toPoint()
-        self._drag_window_pos = self.pos()
-        self._drag_start_scale = self.theme.scale
-
-    def mouseReleaseEvent(self, event) -> None:
-        if self._drag_mode is not None:
+        if kind == QEvent.Type.MouseButtonRelease and self._drag_mode:
+            moved = self._drag_mode == "move"
             self._drag_mode = None
-            self._save_settings()
+            if moved:
+                self._save_settings()
+                return True
+            return False
 
-    def leaveEvent(self, event) -> None:
-        self.unsetCursor()
+        return super().eventFilter(watched, event)
 
     def set_scale(self, scale: float) -> None:
         """Resize the whole interface, text and rows included."""

@@ -841,41 +841,115 @@ def test_losing_focus_does_not_hide_the_window():
         overlay.close()
 
 
-def test_only_the_margin_starts_a_drag():
-    """Dragging must not steal clicks from the query box or the result rows."""
+def test_scale_handle_sits_on_painted_pixels():
+    """The resize handle must be a real widget inside the visible window.
+
+    Regression guard: the resize zone used to live in the transparent shadow
+    padding. WA_TranslucentBackground makes this a layered window, and Windows
+    hit-tests those by pixel alpha, so fully transparent padding is
+    click-through -- WindowFromPoint there returns the window behind. The zone
+    was invisible and could not be clicked at all.
+    """
     import os
 
     pytest.importorskip("PySide6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtCore import QPoint
     from PySide6.QtWidgets import QApplication
 
     from launcher.ui import LauncherOverlay
-    from launcher.ui.overlay import RESIZE_GRIP
+    from launcher.ui.overlay import SHADOW_PAD
 
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
     overlay = LauncherOverlay(Dispatcher(), "Dark")
 
     try:
-        overlay._set_results([Result(title="row%d" % i) for i in range(3)])
-        rect = overlay.rect()
+        overlay.show()
+        app.processEvents()
 
-        # Middle of the window belongs to the widgets, not to dragging
-        assert overlay._zone_at(rect.center()) is None
+        grip = overlay.grip
+        assert grip.isVisible(), "the handle must be visible to be found"
+        assert grip.parent() is overlay.root, "handle must sit on the painted body"
 
-        # The margin moves it
-        assert overlay._zone_at(QPoint(rect.center().x(), 2)) == "move"
-        assert overlay._zone_at(QPoint(2, rect.center().y())) == "move"
+        # Its rectangle in window coordinates must clear the transparent margin
+        top_left = grip.mapTo(overlay, grip.rect().topLeft())
+        bottom_right = grip.mapTo(overlay, grip.rect().bottomRight())
+        body = overlay.rect().adjusted(
+            SHADOW_PAD, SHADOW_PAD, -SHADOW_PAD, -SHADOW_PAD
+        )
+        assert body.contains(top_left) and body.contains(bottom_right), (
+            "handle overlaps the click-through padding"
+        )
 
-        # The bottom-right corner scales instead
-        corner = QPoint(rect.right() - 2, rect.bottom() - 2)
-        assert overlay._zone_at(corner) == "scale"
+        # It must stay on the bar when the interface is scaled
+        overlay.set_scale(1.6)
+        app.processEvents()
+        moved = grip.mapTo(overlay, grip.rect().topLeft())
+        assert overlay.rect().adjusted(
+            SHADOW_PAD, SHADOW_PAD, -SHADOW_PAD, -SHADOW_PAD
+        ).contains(moved), "handle left the body after scaling"
+    finally:
+        overlay.close()
 
-        # Just inside the corner grip is still scale; well clear of it is not
-        assert overlay._zone_at(
-            QPoint(rect.right() - RESIZE_GRIP + 1, rect.bottom() - 2)
-        ) == "scale"
+
+def test_dragging_the_bar_moves_the_window_but_text_still_selects():
+    """An empty bar is a drag surface; typed text still selects normally."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    def send(kind, local, glob, buttons=Qt.LeftButton):
+        ev = QMouseEvent(kind, QPointF(local), QPointF(glob),
+                         Qt.LeftButton, buttons, Qt.NoModifier)
+        app.sendEvent(overlay.query_box, ev)
+        return ev
+
+    try:
+        overlay.show()
+        overlay.move(QPoint(300, 300))
+        app.processEvents()
+
+        # Empty box: pressing anywhere in it arms a window drag
+        start = overlay.pos()
+        spot = QPoint(overlay.query_box.width() // 2, 10)
+        origin = overlay.query_box.mapToGlobal(spot)
+
+        send(QEvent.Type.MouseButtonPress, spot, origin)
+        send(QEvent.Type.MouseMove, spot, origin + QPoint(60, 40))
+        send(QEvent.Type.MouseButtonRelease, spot, origin + QPoint(60, 40),
+             buttons=Qt.NoButton)
+        app.processEvents()
+
+        assert overlay.pos() - start == QPoint(60, 40), "bar drag did not move it"
+
+        # A press that never travels is a plain click, not a move
+        start = overlay.pos()
+        send(QEvent.Type.MouseButtonPress, spot, origin)
+        send(QEvent.Type.MouseButtonRelease, spot, origin, buttons=Qt.NoButton)
+        app.processEvents()
+        assert overlay.pos() == start, "a click without travel moved the window"
+
+        # With text present, a press on the text is for selecting, not dragging
+        overlay.query_box.blockSignals(True)
+        overlay.query_box.setText("chrome")
+        overlay.query_box.blockSignals(False)
+
+        on_text = QPoint(overlay.query_box.contentsRect().left() + 2, 10)
+        assert overlay._is_on_text(on_text), "text was not detected under the press"
+
+        # ... while the empty space to its right still drags
+        far_right = QPoint(overlay.query_box.width() - 40, 10)
+        assert not overlay._is_on_text(far_right), "empty bar space refused to drag"
     finally:
         overlay.close()
 

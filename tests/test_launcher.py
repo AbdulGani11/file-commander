@@ -673,6 +673,25 @@ ROWS = [
 ]
 
 
+def _fixed_app_sources(monkeypatch, start_menu=()):
+    """Replace the machine's real applications with a fixed set.
+
+    Any test that calls reload() without this passes or fails on whatever
+    happens to be installed. reload() merges sources with setdefault in
+    priority order, so an earlier source wins on a name clash: a real Start
+    Menu "Calculator" hides the cached Store one, and an assertion about Store
+    entries then fails on a machine that has one and passes on a machine that
+    does not. That is exactly how this first reached CI green locally and red
+    on the runner.
+    """
+    from launcher.handlers.apps import AppPlugin
+
+    monkeypatch.setattr(AppPlugin, "_start_menu_apps",
+                        lambda self: iter(tuple(start_menu)))
+    monkeypatch.setattr(AppPlugin, "_registered_apps", lambda self: iter(()))
+    monkeypatch.setattr(AppPlugin, "_path_apps", lambda self: iter(()))
+
+
 def test_shell_icon_lookup_fails_quietly_and_frees_its_handles():
     """A bad shell identifier must give a null pixmap, never an exception.
 
@@ -804,7 +823,7 @@ def test_store_apps_launch_through_the_shell_not_the_filesystem():
     assert "Start Menu" in AppPlugin._subtitle(normal)
 
 
-def test_store_cache_round_trip_and_survives_a_failed_query(tmp_path):
+def test_store_cache_round_trip_and_survives_a_failed_query(tmp_path, monkeypatch):
     """A failed refresh must leave the cached list alone.
 
     Returning None for failure and [] for "genuinely nothing installed" is the
@@ -813,6 +832,8 @@ def test_store_cache_round_trip_and_survives_a_failed_query(tmp_path):
     """
     from launcher.handlers import apps
     from launcher.handlers.apps import AppPlugin
+
+    _fixed_app_sources(monkeypatch)
 
     AppPlugin._write_store_cache(ROWS[:2])
     assert apps.UWP_CACHE_PATH.exists()
@@ -854,27 +875,35 @@ def test_store_cache_round_trip_and_survives_a_failed_query(tmp_path):
     assert AppPlugin._read_store_cache() == []
 
 
-def test_background_refresh_adds_apps_without_disturbing_the_list(tmp_path):
+def test_background_refresh_adds_apps_without_disturbing_the_list(tmp_path, monkeypatch):
     """Startup must not wait for PowerShell, which takes over a second.
 
     The launcher's whole startup is around 0.6s, so the Store query is cached
     and refreshed off the startup path. The refresh swaps a rebuilt list in
     with one assignment, so a query iterating the old list is never touched.
     """
-    from launcher.handlers.apps import AppPlugin
+    from launcher.handlers.apps import AppEntry, AppPlugin
+
+    # A fixed non-Store application, so "the refresh preserved what was already
+    # there" is checked against something known rather than whatever this
+    # machine happens to have installed.
+    editor = AppEntry("Some Editor", Path(r"C:\apps\editor.lnk"), "Start Menu")
+    _fixed_app_sources(monkeypatch, start_menu=[editor])
 
     plugin = AppPlugin(refresh_store=False)
     plugin.reload()
     before = plugin.count
     existing = list(plugin._apps)
+    assert {a.name for a in existing} == {"Some Editor"}, "sources were not isolated"
 
     plugin.query_store_apps = staticmethod(lambda: ROWS)
     plugin._refresh_store_apps()
 
     assert plugin.count > before, "the refresh added nothing"
-    assert {"Calculator", "Terminal"} <= {a.name for a in plugin._apps}
+    added = {a.name for a in plugin._apps if a.source == "Store"}
+    assert added == {"Calculator", "Terminal"}, "wrong rows arrived from the refresh"
 
-    # Everything found before the refresh is still there
+    # Everything found before the refresh is still there, and untouched
     assert set(id(a) for a in existing) <= set(id(a) for a in plugin._apps)
 
     # Running it again must not duplicate anything

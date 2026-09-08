@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Launch the Qt overlay.
 
-    python run_launcher.py                 index this repo (fast, for testing)
-    python run_launcher.py --full          index the usual user folders
+    python run_launcher.py                 normal use: cached index + live watcher
+    python run_launcher.py --rebuild       discard the cache and re-crawl
+    python run_launcher.py --repo          quick uncached scan of this project
     python run_launcher.py --theme Darker  pick a theme
+
+Normal startup loads the SQLite cache, so it is fast after the first run, and
+starts the filesystem watcher so the index stays current. Leave it running:
+it is a background launcher, not a command to re-run for each search.
 
 Press Ctrl+Shift+F to toggle the overlay, Esc to hide, Enter to open.
 """
@@ -43,17 +48,26 @@ def main() -> int:
             return 2
 
     ff = load_filefind()
-    index = ff.FileSearchIndex()
+    commander = None
 
-    if "--full" in sys.argv:
-        print("Indexing user folders...")
-        for folder in ("Downloads", "Documents", "Desktop", "Videos", "Pictures"):
-            path = Path.home() / folder
-            if path.is_dir():
-                print("  %-12s %d items" % (folder, index.index_folder(path)))
-    else:
+    if "--repo" in sys.argv:
+        # Quick uncached scan of this project, for trying things out
+        index = ff.FileSearchIndex()
         count = index.index_folder(Path(__file__).parent)
-        print("Indexed %d items from this repo (use --full for user folders)" % count)
+        print("Indexed %d items from this repo (omit --repo for real use)" % count)
+    else:
+        if "--rebuild" in sys.argv and ff.CACHE_DB_PATH.exists():
+            ff.CACHE_DB_PATH.unlink()
+            print("Cache cleared; rebuilding from disk.")
+
+        # FileCommander owns the index lifecycle: it loads the SQLite cache when
+        # one exists and only crawls the disk when it does not. Calling
+        # index_folder directly, as this used to, meant re-crawling every file
+        # on every launch and never using the cache at all.
+        commander = ff.FileCommander()
+        commander.load_or_build_index()
+        commander._start_watcher()      # keeps the index current while running
+        index = commander.search_index
 
     dispatcher = Dispatcher()
 
@@ -87,6 +101,7 @@ def main() -> int:
         keyboard.add_hotkey(HOTKEY, overlay.hotkey_pressed.emit, suppress=True)
         hotkey_ready = True
         print("Press %s to open the overlay. Ctrl+C here to quit." % HOTKEY.upper())
+        print("Leave this running; startup is only slow the first time.")
     except Exception as exc:
         print("Global hotkey unavailable (%s)." % exc)
 
@@ -97,11 +112,19 @@ def main() -> int:
     try:
         return app.exec()
     finally:
+        # Order matters. The overlay's query thread and the filesystem watcher
+        # both outlive exec() otherwise, which is what produced the
+        # "QThread: Destroyed while thread is still running" warning on exit.
         try:
             import keyboard
             keyboard.unhook_all()
         except Exception:
             pass
+
+        overlay.shutdown()
+        dispatcher.shutdown()
+        if commander is not None:
+            commander._stop_watcher()
 
 
 if __name__ == "__main__":

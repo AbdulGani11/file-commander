@@ -325,7 +325,17 @@ class LauncherOverlay(QWidget):
         y = area.y() + int(area.height() * 0.22)
         self.move(x, y)
 
+    def shutdown(self) -> None:
+        """Stop the query thread. Safe to call more than once.
+
+        Closing the widget is not enough on its own: quitting from the terminal
+        never closes a hidden window, so the thread outlived the application and
+        Qt reported "QThread: Destroyed while thread is still running".
+        """
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait(2000)
+
     def closeEvent(self, event) -> None:
-        self._thread.quit()
-        self._thread.wait(1000)
+        self.shutdown()
         super().closeEvent(event)

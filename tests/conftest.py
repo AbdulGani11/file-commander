@@ -43,3 +43,21 @@ def isolate_launcher_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(
         overlay, "SETTINGS_PATH", tmp_path / "launcher.json", raising=False
     )
+
+
+@pytest.fixture(autouse=True)
+def isolate_store_apps(tmp_path, monkeypatch):
+    """Keep the Store app cache and its PowerShell call out of the test run.
+
+    Registering an AppPlugin calls init(), which starts a background refresh
+    that shells out to PowerShell and writes ~/.filefind_apps.json. Left alone
+    that would make every test that touches the plugin slow, dependent on which
+    applications happen to be installed, and a writer to the real home
+    directory. Tests that want the refresh call _refresh_store_apps directly.
+    """
+    from launcher.handlers import apps
+
+    monkeypatch.setattr(apps, "UWP_CACHE_PATH", tmp_path / "apps.json")
+    monkeypatch.setattr(
+        apps.AppPlugin, "refresh_store_apps_async", lambda self: None
+    )

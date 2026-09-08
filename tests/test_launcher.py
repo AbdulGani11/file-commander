@@ -660,6 +660,139 @@ def test_icon_cache_is_bounded(tmp_path):
     assert newest in result_view._ICON_CACHE, "most recent icon was evicted"
 
 
+# Store applications
+
+
+ROWS = [
+    {"Name": "Calculator", "AppID": "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"},
+    {"Name": "Terminal", "AppID": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"},
+    {"Name": "Notepad", "AppID": r"C:\Windows\System32\notepad.exe"},
+    {"Name": "", "AppID": "Broken.NoName_x!App"},
+    {"Name": "No Id", "AppID": ""},
+    "not a dictionary at all",
+]
+
+
+def test_store_rows_become_apps_but_plain_executables_do_not():
+    """Only Store entries are taken from the Start Menu app list.
+
+    An AppID ending in .exe is an ordinary program the Start Menu scan already
+    found under a friendlier name, so taking it here would have the plugin
+    compete with itself. Malformed rows must be skipped, not crash the scan.
+    """
+    from launcher.handlers.apps import AppPlugin
+
+    got = {e.name: e for e in AppPlugin._store_apps(ROWS)}
+
+    assert set(got) == {"Calculator", "Terminal"}, "wrong rows survived the filter"
+    assert all(e.source == "Store" for e in got.values())
+    assert str(got["Calculator"].target).endswith("!App")
+
+    # Nothing to iterate is not an error
+    assert list(AppPlugin._store_apps([])) == []
+    assert list(AppPlugin._store_apps(None)) == []
+
+
+def test_store_apps_launch_through_the_shell_not_the_filesystem():
+    """A Store app has no file to open, so it is addressed by identifier.
+
+    os.startfile on the raw AppID would fail: it is not a path. The shell's
+    applications folder is what turns it into something launchable.
+    """
+    from launcher.handlers.apps import AppPlugin, AppEntry
+
+    store = AppEntry("Calculator", Path("Microsoft.WindowsCalculator_x!App"), "Store")
+    normal = AppEntry("Notepad", Path(r"C:\Windows\notepad.exe"), "Start Menu")
+
+    assert AppPlugin._launch_target(store) == (
+        r"shell:AppsFolder\Microsoft.WindowsCalculator_x!App"
+    )
+    assert AppPlugin._launch_target(normal) == r"C:\Windows\notepad.exe"
+
+    # The subtitle cannot show a parent folder for something that is not a path
+    assert AppPlugin._subtitle(store) == "Store app"
+    assert "Start Menu" in AppPlugin._subtitle(normal)
+
+
+def test_store_cache_round_trip_and_survives_a_failed_query(tmp_path):
+    """A failed refresh must leave the cached list alone.
+
+    Returning None for failure and [] for "genuinely nothing installed" is the
+    distinction that makes this possible. Collapsing them would let one broken
+    PowerShell call wipe every Store app until the next successful refresh.
+    """
+    from launcher.handlers import apps
+    from launcher.handlers.apps import AppPlugin
+
+    AppPlugin._write_store_cache(ROWS[:2])
+    assert apps.UWP_CACHE_PATH.exists()
+    assert AppPlugin._read_store_cache() == ROWS[:2]
+
+    plugin = AppPlugin(refresh_store=False)
+    plugin.reload()
+    names = {a.name for a in plugin._apps if a.source == "Store"}
+    assert {"Calculator", "Terminal"} <= names, "cache was not used by reload"
+
+    # Drive the real failure path: PowerShell missing, or refusing to start
+    import subprocess
+
+    def explode(*a, **kw):
+        raise OSError("powershell is not available")
+
+    original_run = subprocess.run
+    subprocess.run = explode
+    try:
+        assert AppPlugin.query_store_apps() is None, (
+            "a failed query must report None, not an empty list; an empty list "
+            "means 'nothing installed' and would wipe the cache"
+        )
+        plugin._refresh_store_apps()
+    finally:
+        subprocess.run = original_run
+
+    assert AppPlugin._read_store_cache() == ROWS[:2], "a failed query wiped the cache"
+
+    # Unparseable output is a failure too, not an empty machine
+    subprocess.run = lambda *a, **kw: type("R", (), {"stdout": "<<not json>>"})()
+    try:
+        assert AppPlugin.query_store_apps() is None
+    finally:
+        subprocess.run = original_run
+
+    # An unreadable cache is empty, not an exception
+    apps.UWP_CACHE_PATH.write_text("{ not json", encoding="utf-8")
+    assert AppPlugin._read_store_cache() == []
+
+
+def test_background_refresh_adds_apps_without_disturbing_the_list(tmp_path):
+    """Startup must not wait for PowerShell, which takes over a second.
+
+    The launcher's whole startup is around 0.6s, so the Store query is cached
+    and refreshed off the startup path. The refresh swaps a rebuilt list in
+    with one assignment, so a query iterating the old list is never touched.
+    """
+    from launcher.handlers.apps import AppPlugin
+
+    plugin = AppPlugin(refresh_store=False)
+    plugin.reload()
+    before = plugin.count
+    existing = list(plugin._apps)
+
+    plugin.query_store_apps = staticmethod(lambda: ROWS)
+    plugin._refresh_store_apps()
+
+    assert plugin.count > before, "the refresh added nothing"
+    assert {"Calculator", "Terminal"} <= {a.name for a in plugin._apps}
+
+    # Everything found before the refresh is still there
+    assert set(id(a) for a in existing) <= set(id(a) for a in plugin._apps)
+
+    # Running it again must not duplicate anything
+    after_first = plugin.count
+    plugin._refresh_store_apps()
+    assert plugin.count == after_first, "a second refresh duplicated entries"
+
+
 # Window placement, scaling, and when the overlay is allowed to hide
 
 

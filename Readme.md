@@ -12,7 +12,7 @@ Search queries run with $O(m)$ prefix speed, where $m$ is the number of letters 
     
 - **Live Background Updates:** A background file listener monitors your folders and sends file creation, deletion, and rename events to a background worker thread using a safe queue.
     
-- **Application Launcher:** Finds installed programs from three places Windows uses: Start Menu shortcuts, the Windows registry `App Paths` key, and programs located in your system `PATH`. Short name matching also lets you find tools quickly, such as typing `vsc` to find Visual Studio Code.
+- **Application Launcher:** Finds installed programs from four places Windows uses: Start Menu shortcuts, the registry `App Paths` key, your system `PATH`, and the Store app list. Store programs such as Calculator, Photos and Terminal have no executable on disk, so they are fetched separately and cached, keeping them out of the startup path. Short name matching also lets you find tools quickly, such as typing `vsc` to find Visual Studio Code.
     
 - **Floating Search Window:** A quick launcher mode keeps the index ready in memory. Pressing `Ctrl+Shift+F` opens a clean, borderless search window right on top of your screen, letting you find files without leaving your active work. Drag it anywhere, scale the whole interface to suit your display, and it reopens where you left it.
     
@@ -207,7 +207,7 @@ The strongest protection is what the program does not do. Renaming files, and th
 
 ## Automated Testing
 
-FileFind includes unit tests managed through pytest. Currently, all **65 tests** pass cleanly.
+FileFind includes unit tests managed through pytest. Currently, all **69 tests** pass cleanly.
 
 ### Running Tests
 
@@ -229,7 +229,7 @@ pytest --cov=FileFind --cov=launcher
     
 - **Search Engine** (`test_search.py`, 14 tests): Verifies character branches, prefix searches, uppercase or lowercase matching, short name tokens, and that files added to the index are found by search words.
     
-- **Launcher** (`test_launcher.py`, 44 tests): Verifies query parsing, keyword routing, search cancellation, one failing connector not breaking the rest, the ranking that keeps applications above similarly named files, and the graphical window itself, including the global shortcut arriving from another thread, `Alt+1` to `Alt+9`, window sizing, interface scaling, moving and remembering position, and the icon cache.
+- **Launcher** (`test_launcher.py`, 48 tests): Verifies query parsing, keyword routing, search cancellation, one failing connector not breaking the rest, the ranking that keeps applications above similarly named files, and the graphical window itself, including the global shortcut arriving from another thread, `Alt+1` to `Alt+9`, window sizing, interface scaling, moving and remembering position, and the icon cache.
     
 - **Isolated Temporary Folders:** Tests use pytest `tmp_path` helpers so they only read and write inside temporary test folders. The launcher's saved position is redirected there too, so a test run cannot move your real window.
     

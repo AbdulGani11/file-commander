@@ -4,14 +4,20 @@ Application Search - Finds installed programs so they can be launched
 FileFind's file index deliberately skips 'programdata' and 'appdata', which is
 correct for finding documents but hides every installed application, because
 that is exactly where Windows keeps its Start Menu shortcuts. This plugin
-indexes applications separately, from the three places Windows actually
-registers them.
+indexes applications separately, from the four places Windows registers them.
+
+Three of those sources are cheap and read directly. The fourth, Store apps, has
+to be asked for through PowerShell and costs over a second, so it is cached and
+refreshed on a background thread rather than delaying startup.
 """
 
+import json
 import os
+import subprocess
+import threading
 import winreg
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .. import matcher
 from ..handler import BasePlugin, CancellationToken
@@ -50,6 +56,24 @@ APP_SCORE_BONUS = 100
 # box, so they rank below properly installed applications.
 PATH_SCORE_PENALTY = 150
 
+# SOURCE 4 - Store applications.
+#
+# Store apps have no ordinary executable on disk, so none of the three sources
+# above can see them: Calculator, Clock, Photos, Paint and Terminal are all
+# missing without this. Windows will list them, but only through PowerShell.
+UWP_QUERY = "Get-StartApps | ConvertTo-Json -Compress"
+
+# Measured at 1.2 seconds on the development machine, against 0.63s for the
+# launcher's entire startup. Paying that on every launch to find apps that
+# change a few times a year is a bad trade, so the answer is cached beside the
+# engine's own dotfiles and refreshed in the background.
+UWP_CACHE_PATH = Path.home() / ".filefind_apps.json"
+UWP_TIMEOUT = 25          # seconds; a hung PowerShell must not leak a thread
+
+# Store entries are launched through the shell's applications folder rather than
+# by path, since there is no path to open.
+UWP_SHELL_PREFIX = "shell:AppsFolder\\"
+
 
 class AppEntry:
     """One installed application: its display name and how to launch it."""
@@ -57,7 +81,7 @@ class AppEntry:
     def __init__(self, name: str, target: Path, source: str):
         self.name = name                  # Shown as the result title
         self.target = target              # What gets opened
-        self.source = source              # Which of the three sources found it
+        self.source = source              # Which of the four sources found it
         self.lowered = name.lower()       # Cached to avoid lowering on every keystroke
 
 
@@ -68,15 +92,23 @@ class AppPlugin(BasePlugin):
     keyword = GLOBAL_WILDCARD    # Runs on every search, alongside file search
     search_delay = 0.0           # The list is built once and held in memory
 
-    def __init__(self):
+    def __init__(self, refresh_store: bool = True):
         self._apps: List[AppEntry] = []
+        self._refresh_store = refresh_store
+        self._store_thread: Optional[threading.Thread] = None
 
     def init(self) -> None:
         """Build the application list once, at registration."""
         self.reload()
+        if self._refresh_store:
+            self.refresh_store_apps_async()
 
     def reload(self) -> int:
-        """Rescan all sources. Returns the number of applications found."""
+        """Rescan all sources. Returns the number of applications found.
+
+        Store apps come from the cache here, never from PowerShell, so this
+        stays fast enough to run during startup.
+        """
         found: Dict[str, AppEntry] = {}
 
         # Later sources must not overwrite earlier ones, so the ordering here is
@@ -84,6 +116,8 @@ class AppPlugin(BasePlugin):
         for entry in self._start_menu_apps():
             found.setdefault(entry.lowered, entry)
         for entry in self._registered_apps():
+            found.setdefault(entry.lowered, entry)
+        for entry in self._store_apps(self._read_store_cache()):
             found.setdefault(entry.lowered, entry)
         for entry in self._path_apps():
             found.setdefault(entry.lowered, entry)
@@ -189,6 +223,108 @@ class AppPlugin(BasePlugin):
             except OSError:
                 continue
 
+    # SOURCE 4 - Store applications, via the Start Menu app list
+
+    @staticmethod
+    def _store_apps(entries):
+        """Turn Get-StartApps rows into entries, keeping only the Store ones.
+
+        An AppID ending in .exe is an ordinary program that the Start Menu scan
+        has already found under a friendlier name, so it is dropped here rather
+        than competing with itself.
+        """
+        for entry in entries or ():
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("Name") or "").strip()
+            app_id = (entry.get("AppID") or "").strip()
+            if not name or not app_id or app_id.lower().endswith(".exe"):
+                continue
+            yield AppEntry(name, Path(app_id), "Store")
+
+    @staticmethod
+    def _read_store_cache():
+        """Load the cached Get-StartApps rows. Never raises."""
+        try:
+            with open(UWP_CACHE_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return []
+        return data if isinstance(data, list) else []
+
+    @staticmethod
+    def _write_store_cache(entries) -> None:
+        """Save the rows for the next launch. Never raises."""
+        try:
+            with open(UWP_CACHE_PATH, "w", encoding="utf-8") as handle:
+                json.dump(entries, handle)
+        except Exception:
+            pass            # A missing cache costs a refresh, never a crash
+
+    @staticmethod
+    def query_store_apps():
+        """Ask Windows for its Start Menu app list. Slow: over a second.
+
+        Returns None if the query failed, which is different from returning an
+        empty list: a failure must leave the existing cache alone rather than
+        wiping it.
+        """
+        try:
+            done = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive",
+                 "-Command", UWP_QUERY],
+                capture_output=True, text=True, timeout=UWP_TIMEOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        try:
+            data = json.loads(done.stdout or "null")
+        except ValueError:
+            return None
+
+        if isinstance(data, dict):
+            return [data]           # ConvertTo-Json unwraps a single row
+        return data if isinstance(data, list) else None
+
+    def refresh_store_apps_async(self) -> threading.Thread:
+        """Refresh the Store list off the startup path.
+
+        Startup reads the cache and moves on; this catches up a second or so
+        later and swaps the fuller list in. A newly installed Store app is
+        therefore missing until the next launch, which is the right trade
+        against making every launch wait for PowerShell.
+        """
+        thread = threading.Thread(
+            target=self._refresh_store_apps, daemon=True, name="filefind-storeapps"
+        )
+        self._store_thread = thread
+        thread.start()
+        return thread
+
+    def _refresh_store_apps(self) -> None:
+        entries = self.query_store_apps()
+        if entries is None:
+            return              # Query failed; keep whatever the cache had
+        self._write_store_cache(entries)
+        self._merge_store_apps(entries)
+
+    def _merge_store_apps(self, entries) -> None:
+        """Add newly discovered Store apps to the live list.
+
+        Rebuilds a whole list and swaps the reference in one assignment, so a
+        query iterating the old list is never touched mid-scan.
+        """
+        by_name = {app.lowered: app for app in self._apps}
+        added = False
+        for entry in self._store_apps(entries):
+            if entry.lowered not in by_name:
+                by_name[entry.lowered] = entry
+                added = True
+        if added:
+            self._apps = list(by_name.values())
+
     # SEARCHING
 
     def query(self, q: Query, token: CancellationToken) -> List[Result]:
@@ -212,7 +348,7 @@ class AppPlugin(BasePlugin):
             results.append(
                 Result(
                     title=app.name,
-                    subtitle="%s  ·  %s" % (app.source, app.target.parent),
+                    subtitle=self._subtitle(app),
                     score=score,
                     action=self._make_launch_action(app),
                     icon="app",
@@ -221,6 +357,17 @@ class AppPlugin(BasePlugin):
             )
 
         return results
+
+    @staticmethod
+    def _subtitle(app: AppEntry) -> str:
+        """The grey line under the name: where this application came from.
+
+        A Store app's target is an identifier, not a path, so it has no parent
+        folder to show and would otherwise render as a bare dot.
+        """
+        if app.source == "Store":
+            return "Store app"
+        return "%s  ·  %s" % (app.source, app.target.parent)
 
     def _score(self, app: AppEntry, needle: str) -> int:
         """Rate how well an application matches. 0 means no match.
@@ -238,6 +385,17 @@ class AppPlugin(BasePlugin):
         return score
 
     @staticmethod
+    def _launch_target(app: AppEntry) -> str:
+        """What os.startfile should be handed for this application.
+
+        A Store app has no file to open, so its identifier is addressed through
+        the shell's applications folder instead of the filesystem.
+        """
+        if app.source == "Store":
+            return UWP_SHELL_PREFIX + str(app.target)
+        return str(app.target)
+
+    @staticmethod
     def _make_launch_action(app: AppEntry):
         """Build the Enter action that starts the application."""
 
@@ -245,7 +403,7 @@ class AppPlugin(BasePlugin):
             # os.startfile hands the path to the Windows shell, which resolves
             # shortcuts and applies file associations. No command string is
             # built, so nothing in the name can be interpreted as a command.
-            os.startfile(str(app.target))
+            os.startfile(AppPlugin._launch_target(app))
             return True          # Hide the launcher after starting the app
 
         return _launch

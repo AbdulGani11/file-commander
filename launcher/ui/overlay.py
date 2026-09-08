@@ -223,10 +223,24 @@ class LauncherOverlay(QWidget):
         self._resize_to_results()
 
     def _resize_to_results(self) -> None:
-        height = self.result_list.visible_height()
-        self.result_list.setFixedHeight(height)
-        self.separator.setVisible(height > 0)
-        self.adjustSize()
+        """Resize the window to fit exactly the rows currently shown.
+
+        The height is computed rather than left to adjustSize(). adjustSize
+        grows a top level window happily but will not always shrink it again,
+        so clearing the results left the window at its previous larger size
+        with empty space below the search box until the next query.
+        """
+        list_height = self.result_list.visible_height()
+        self.result_list.setFixedHeight(list_height)
+        self.separator.setVisible(list_height > 0)
+
+        height = (
+            SHADOW_PAD * 2
+            + self.theme.m("query_height")
+            + (self.separator.height() if list_height > 0 else 0)
+            + list_height
+        )
+        self.setFixedHeight(height)
 
     # interaction
 

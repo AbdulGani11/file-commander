@@ -532,3 +532,53 @@ def test_alt_number_opens_the_matching_row():
         assert opened == []
     finally:
         overlay.close()
+
+
+def test_window_shrinks_back_when_results_are_cleared():
+    """The window must fit its rows exactly, growing and shrinking.
+
+    Regression guard: the height was left to adjustSize(), which grows a top
+    level window but does not reliably shrink it. Clearing the results left the
+    window at its previous size with empty space below the search box until the
+    next query resized it.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    def rows(n):
+        return [Result(title="row%d" % i, score=100 - i) for i in range(n)]
+
+    try:
+        empty_height = overlay.height()
+
+        overlay._set_results(rows(3))
+        app.processEvents()
+        three = overlay.height()
+        assert three > empty_height, "window did not grow for results"
+
+        overlay._set_results(rows(1))
+        app.processEvents()
+        assert overlay.height() < three, "window did not shrink for fewer results"
+
+        overlay._set_results([])
+        app.processEvents()
+        assert overlay.height() == empty_height, "window did not return to its empty size"
+
+        # More rows than fit are capped, so the window stops growing
+        overlay._set_results(rows(5))
+        app.processEvents()
+        five = overlay.height()
+        overlay._set_results(rows(20))
+        app.processEvents()
+        assert overlay.height() == five, "window grew past the visible row limit"
+    finally:
+        overlay.close()

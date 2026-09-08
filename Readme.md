@@ -69,7 +69,7 @@ Old search tree references are filtered out before ranking by checking every mat
 
 - Windows 10 or Windows 11
     
-- Python 3.10 or newer
+- Python 3.12 or newer
     
 
 ### Setup Steps
@@ -104,7 +104,7 @@ The command line tool only needs `rich` to run. Other tools are optional, and Fi
 |**Package**|**Minimum Version**|**Requirement**|**What Is Lost If Missing**|
 |`rich`|`>= 15.0.0`|Required|The command line screen cannot display without it|
 |`watchdog`|`>= 6.0.0`|Optional|Live background file change tracking|
-|`rapidfuzz`|`>= 3.14.5`|Optional|Typo correction and "Did you mean?" suggestions|
+|`rapidfuzz`|`>= 3.14.6`|Optional|Typo correction and "Did you mean?" suggestions|
 |`keyboard`|`>= 0.13.5`|Launcher|Global hotkey to open the floating window|
 |`PySide6-Essentials`|`>= 6.11.2`|Launcher|Drawing the graphical search window|
 |`pytest`|`>= 9.1.1`|Development|Running automated tests|
@@ -280,11 +280,11 @@ Every push and pull request to the `main` branch runs tests automatically throug
 
 Tests run on a `windows-latest` machine across multiple Python versions:
 
-- Python 3.10
-    
-- Python 3.11
-    
 - Python 3.12
+    
+- Python 3.13
+    
+- Python 3.14
     
 
 Tests run directly on Windows runners so that Windows specific path features and system names are verified accurately.
@@ -294,7 +294,7 @@ Tests run directly on Windows runners so that Windows specific path features and
 |   |   |
 |---|---|
 |**Area**|**Implementation Detail**|
-|**Language**|Python 3.10 and newer with type hints|
+|**Language**|Python 3.12 and newer with type hints|
 |**Core Structures**|Character Trie, Inverted Word Index, Exact Match Dictionary|
 |**Saved Cache**|SQLite database with Write Ahead Logging enabled|
 |**File Watcher**|Event listener checking Windows folder change signals|

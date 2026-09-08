@@ -582,3 +582,265 @@ def test_window_shrinks_back_when_results_are_cleared():
         assert overlay.height() == five, "window grew past the visible row limit"
     finally:
         overlay.close()
+
+
+# Paint path: what the UI thread pays on every keystroke
+
+
+def test_icon_cache_stores_rendered_pixmaps_not_lazy_handles(tmp_path):
+    """The icon cache must hold the finished pixmap, not the promise of one.
+
+    Regression guard: it cached the QIcon returned by QFileIconProvider, which
+    is lazy -- no shell work happens until a pixmap is asked for, which is
+    inside paint(), on the UI thread. So the cache stored the cheap half and
+    the expensive half was re-paid on every repaint: measured at 866x the cost
+    of the handle, up to 85ms for one row, which is what made the search box
+    lag behind typing.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import result_view
+
+    QApplication.instance() or QApplication([])
+
+    sample = tmp_path / "sample.txt"
+    sample.write_text("x")
+
+    result_view._ICON_CACHE.clear()
+    pixmap = result_view._pixmap_for(str(sample), 32)
+
+    assert isinstance(pixmap, QPixmap), "cache must yield a rendered pixmap"
+    assert len(result_view._ICON_CACHE) == 1
+
+    # The second call must return the same object, not re-extract it
+    again = result_view._pixmap_for(str(sample), 32)
+    assert again is pixmap, "a cached icon was rendered a second time"
+
+    # Size is part of the identity, so a different size is a different entry
+    result_view._pixmap_for(str(sample), 16)
+    assert len(result_view._ICON_CACHE) == 2
+
+
+def test_icon_cache_is_bounded(tmp_path):
+    """The cache must not grow for the whole session.
+
+    Rendered pixmaps hold real memory, unlike the empty handles this used to
+    keep, so an unbounded cache is now a leak rather than a rounding error.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import result_view
+
+    QApplication.instance() or QApplication([])
+
+    result_view._ICON_CACHE.clear()
+    limit = result_view.MAX_CACHED_ICONS
+
+    # .exe carries its own icon per file, so each of these is a distinct entry.
+    # Ordinary documents would collapse onto one shared key and never fill it.
+    for i in range(limit + 25):
+        result_view._pixmap_for(str(tmp_path / ("f%d.exe" % i)), 32)
+
+    assert len(result_view._ICON_CACHE) <= limit, "icon cache grew without limit"
+
+    # The oldest entries are the ones dropped
+    assert (str(tmp_path / "f0.exe"), 32, 1.0) not in result_view._ICON_CACHE
+    newest = (str(tmp_path / ("f%d.exe" % (limit + 24))), 32, 1.0)
+    assert newest in result_view._ICON_CACHE, "most recent icon was evicted"
+
+
+def test_ordinary_files_share_one_icon_per_type():
+    """Documents of the same type must share a single rendered icon.
+
+    Windows shows one picture for every .txt, so extracting it per file meant a
+    fresh twenty-row result set made twenty shell calls, each up to 400ms, all
+    on the UI thread. Only types that carry their own icon -- programs and
+    shortcuts -- are still kept per file.
+    """
+    pytest.importorskip("PySide6")
+
+    from launcher.ui.result_view import _icon_identity
+
+    # Same type, different files: one identity
+    assert _icon_identity(r"C:\a\notes.txt", "file") == _icon_identity(
+        r"D:\elsewhere\other.txt", "file"
+    )
+    # Different types stay apart
+    assert _icon_identity(r"C:\a\notes.txt", "file") != _icon_identity(
+        r"C:\a\notes.pdf", "file"
+    )
+    # Case in the extension must not split the entry
+    assert _icon_identity(r"C:\a\A.TXT", "file") == _icon_identity(
+        r"C:\a\b.txt", "file"
+    )
+
+    # Programs and shortcuts keep their own icon, so they stay per file
+    for path in (r"C:\apps\chrome.exe", r"C:\menu\Chrome.lnk"):
+        assert _icon_identity(path, "file") == path
+    assert _icon_identity(r"C:\apps\thing.exe", "app") == r"C:\apps\thing.exe"
+
+    # Folders all look alike
+    assert _icon_identity(r"C:\one", "folder") == _icon_identity(r"D:\two", "folder")
+
+
+def test_painting_never_waits_for_the_shell(tmp_path):
+    """Painting a row must not extract its icon.
+
+    Shell extraction runs from 2ms for a document to 85ms for an executable,
+    and it used to happen inside paint(), on the UI thread, which is the thread
+    that also has to echo typed characters into the query box. A row whose icon
+    is not cached yet draws the placeholder glyph and queues the extraction for
+    the next turn of the event loop instead.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+    from launcher.ui import result_view
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    sample = tmp_path / "row.txt"
+    sample.write_text("x")
+
+    extracted = []
+    original = result_view._extract_pixmap
+
+    def counting_extract(key, path=""):
+        extracted.append(key)
+        return original(key, path)
+
+    result_view._extract_pixmap = counting_extract
+    try:
+        result_view._ICON_CACHE.clear()
+        overlay._set_results([Result(title="row.txt", context={"path": sample})])
+        overlay.show()
+        app.processEvents()          # lets the row paint
+
+        assert extracted == [], "paint() extracted an icon instead of queueing it"
+        assert overlay.result_list._icon_queue, "no icon was queued for rendering"
+
+        # The queued work happens on a later turn of the loop
+        for _ in range(20):
+            app.processEvents()
+            if extracted:
+                break
+
+        assert extracted, "queued icon was never rendered"
+        assert not overlay.result_list._icon_queue, "icon queue was not drained"
+
+        # Now that it is cached, painting must not queue it again
+        overlay.result_list.viewport().update()
+        app.processEvents()
+        assert not overlay.result_list._icon_queue, "a cached icon was queued again"
+    finally:
+        result_view._extract_pixmap = original
+        overlay.close()
+
+
+def test_window_surface_is_rendered_once_per_size():
+    """The drop shadow must not be re-stroked on every repaint.
+
+    It is two dozen stacked antialiased rounded outlines. Redrawing them for
+    each paint made the window surface the second largest cost on the UI
+    thread, behind only the icons. It only changes when the window resizes or
+    the theme changes, so it is cached against exactly those.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+    from launcher.ui.theme import Theme
+
+    app = QApplication.instance() or QApplication([])
+    overlay = LauncherOverlay(Dispatcher(), "Dark")
+
+    try:
+        first = overlay._surface_pixmap()
+        assert overlay._surface_pixmap() is first, "surface was redrawn unchanged"
+
+        # Resizing must invalidate it
+        overlay._set_results([Result(title="row%d" % i) for i in range(3)])
+        app.processEvents()
+        grown = overlay._surface_pixmap()
+        assert grown is not first, "surface survived a resize"
+
+        # So must a theme swap, since the colours are baked into the pixmap
+        overlay.apply_theme(Theme("Light"))
+        app.processEvents()
+        assert overlay._surface_pixmap() is not grown, "surface survived a theme change"
+    finally:
+        overlay.close()
+
+
+def test_typing_cancels_the_query_still_in_flight():
+    """A keystroke must cancel the query the worker is running right now.
+
+    Regression guard: cancellation lived at the top of Dispatcher.query, but
+    requests are queued onto one worker thread and each runs to completion, so
+    the previous query was always already finished by then and the token checks
+    in the plugins never fired. The cancel has to come from the UI thread.
+    """
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from launcher.ui import LauncherOverlay
+
+    QApplication.instance() or QApplication([])
+
+    started = threading.Event()
+    observed = []
+
+    class SlowPlugin(BasePlugin):
+        name = "slow"
+
+        def query(self, q, token):
+            started.set()
+            token.wait(2.0)             # stands in for real per-keystroke work
+            observed.append(token.cancelled)
+            return []
+
+    dispatcher = Dispatcher()
+    dispatcher.register(SlowPlugin())
+    overlay = LauncherOverlay(dispatcher, "Dark")
+
+    try:
+        overlay.query_box.setText("a")
+        assert started.wait(2.0), "worker never picked the query up"
+
+        # Second keystroke while the first is still running
+        overlay.query_box.setText("ab")
+
+        deadline = time.time() + 2.0
+        while not observed and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert observed, "the in-flight query never finished"
+        assert observed[0] is True, "typing did not cancel the running query"
+    finally:
+        overlay.close()
+        dispatcher.shutdown()

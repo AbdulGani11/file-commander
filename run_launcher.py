@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication
 from launcher import Dispatcher
 from launcher.handlers import AppPlugin, FilePlugin
 from launcher.ui import THEMES, LauncherOverlay, Theme
+from launcher.ui.result_view import warm_icon_provider
 
 HOTKEY = "ctrl+shift+f"
 
@@ -82,6 +83,11 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
 
     overlay = LauncherOverlay(dispatcher, theme_name)
+
+    # The shell charges about 300ms for the first icon of the session, whatever
+    # it is asked about. Spend it now, with the window still hidden, rather than
+    # on the user's first keystroke.
+    warm_icon_provider()
 
     # Ctrl+C in the terminal. Qt's event loop blocks inside C++, so Python
     # never gets a chance to run its signal handler. The repeating timer hands

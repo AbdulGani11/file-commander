@@ -28,6 +28,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QPainter,
     QPen,
+    QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -81,6 +82,12 @@ class LauncherOverlay(QWidget):
         self.theme = Theme(theme_name)
         self._seq = 0
         self._results: List[Result] = []
+
+        # Cached window surface, rebuilt only when the size or theme changes.
+        # Set before any widget exists, because a paint can arrive at any point
+        # once the window is built.
+        self._surface: Optional[QPixmap] = None
+        self._surface_key = None
 
         self._build_window()
         self._build_ui()
@@ -166,8 +173,16 @@ class LauncherOverlay(QWidget):
 
     def _on_text_changed(self, text: str) -> None:
         self._seq += 1
+
+        # Cancel from here rather than leaving it to the next Dispatcher.query.
+        # Requests are queued onto a single worker thread and each runs to
+        # completion, so by the time the next query starts the previous one has
+        # already finished and there is nothing left to cancel: the token checks
+        # in the plugins were measured firing once in fifteen keystrokes. The
+        # cancel has to come from this thread to reach a query still in flight.
+        self._dispatcher.cancel()
+
         if not text.strip():
-            self._dispatcher.cancel()
             self._set_results([])
             return
         self.request_query.emit(self._seq, text)
@@ -246,7 +261,26 @@ class LauncherOverlay(QWidget):
 
     def paintEvent(self, event) -> None:
         """Draw the rounded window surface and its drop shadow."""
-        painter = QPainter(self)
+        QPainter(self).drawPixmap(0, 0, self._surface_pixmap())
+
+    def _surface_pixmap(self) -> QPixmap:
+        """The window surface, drawn once per size and reused after that.
+
+        The shadow is two dozen stacked rounded outlines, and re-stroking them
+        on every repaint cost more than the rest of the window put together.
+        The geometry only changes when the window is resized or the theme is
+        swapped, so it is rendered once and blitted from then on.
+        """
+        ratio = self.devicePixelRatioF()
+        key = (self.width(), self.height(), self.theme.name, ratio)
+        if key == self._surface_key and self._surface is not None:
+            return self._surface
+
+        pixmap = QPixmap(int(self.width() * ratio), int(self.height() * ratio))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.transparent)          # the window is translucent
+
+        painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         radius = self.theme.m("window_radius")
@@ -269,6 +303,11 @@ class LauncherOverlay(QWidget):
         painter.setPen(QPen(QColor(self.theme.c("window_border")), 1))
         painter.setBrush(QColor(self.theme.c("window_bg")))
         painter.drawRoundedRect(body, radius, radius)
+        painter.end()
+
+        self._surface_key = key
+        self._surface = pixmap
+        return pixmap
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()

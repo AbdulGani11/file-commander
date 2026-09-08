@@ -104,7 +104,7 @@ The command line tool only needs `rich` to run. Other tools are optional, and Fi
 |**Package**|**Minimum Version**|**Requirement**|**What Is Lost If Missing**|
 |`rich`|`>= 15.0.0`|Required|The command line screen cannot display without it|
 |`watchdog`|`>= 6.0.0`|Optional|Live background file change tracking|
-|`rapidfuzz`|`>= 3.14.6`|Optional|Typo correction and "Did you mean?" suggestions|
+|`rapidfuzz`|`>= 3.14.5`|Optional|Typo correction and "Did you mean?" suggestions|
 |`keyboard`|`>= 0.13.5`|Launcher|Global hotkey to open the floating window|
 |`PySide6-Essentials`|`>= 6.11.2`|Launcher|Drawing the graphical search window|
 |`pytest`|`>= 9.1.1`|Development|Running automated tests|

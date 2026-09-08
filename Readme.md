@@ -10,7 +10,7 @@ Search queries run with $O(m)$ prefix speed, where $m$ is the number of letters 
     
 - **Fast Startup on Later Runs:** Saves index data to an SQLite database file at `~/.filefind_cache.db`. Measured on the development machine, a later start rebuilds the whole index of $39{,}930$ files from that cache in $0.71$ seconds, against $19.5$ seconds to crawl the same folders from disk.
     
-- **Live Background Updates:** A background file listener monitors your folders and sends file creation, deletion, and rename events to a background worker thread using a safe queue.
+- **Live Background Updates:** A background file listener monitors your folders and sends file creation, deletion, and rename events to a worker thread through a safe queue. The worker applies them in batches under a single database commit, which measured $74{,}835$ events per second: a burst of 15,000 new files is absorbed in $0.2$ seconds rather than leaving results stale while it catches up.
     
 - **Application Launcher:** Finds installed programs from four places Windows uses: Start Menu shortcuts, the registry `App Paths` key, your system `PATH`, and the Store app list. Store programs such as Calculator, Photos and Terminal have no executable on disk, so they are fetched separately and cached, keeping them out of the startup path. Short name matching also lets you find tools quickly, such as typing `vsc` to find Visual Studio Code.
     
@@ -207,7 +207,7 @@ The strongest protection is what the program does not do. Renaming files, and th
 
 ## Automated Testing
 
-FileFind includes unit tests managed through pytest. Currently, all **69 tests** pass cleanly.
+FileFind includes unit tests managed through pytest. Currently, all **73 tests** pass cleanly.
 
 ### Running Tests
 
@@ -227,7 +227,7 @@ pytest --cov=FileFind --cov=launcher
 
 - **Path Safety** (`test_path_utils.py`, 7 tests): Verifies safe filename checks, folder escape prevention, illegal Windows character blocking, reserved system name blocking, end of line space rules, name length limits, and drive letter detection.
     
-- **Search Engine** (`test_search.py`, 14 tests): Verifies character branches, prefix searches, uppercase or lowercase matching, short name tokens, and that files added to the index are found by search words.
+- **Search Engine** (`test_search.py`, 18 tests): Verifies character branches, prefix searches, uppercase or lowercase matching, short name tokens, and that files added to the index are found by search words.
     
 - **Launcher** (`test_launcher.py`, 48 tests): Verifies query parsing, keyword routing, search cancellation, one failing connector not breaking the rest, the ranking that keeps applications above similarly named files, and the graphical window itself, including the global shortcut arriving from another thread, `Alt+1` to `Alt+9`, window sizing, interface scaling, moving and remembering position, and the icon cache.
     

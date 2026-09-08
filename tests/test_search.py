@@ -342,3 +342,154 @@ def test_writer_loop_exits_when_database_is_unusable(tmp_path):
     time.sleep(0.3)
     assert not worker.is_alive()
     stop.set()
+
+
+# Batched writing, so a burst of changes cannot leave the index behind
+
+
+def test_batch_takes_everything_already_waiting():
+    """A burst must be applied under one commit, not one commit per file.
+
+    Committing per event held the writer near 1,000 events a second, so 15,000
+    new files backed the queue up 8,700 deep and left the index stale for ten
+    seconds. Batching took the same burst to a peak depth of 20.
+    """
+    import queue
+
+    ff = _load_ff()
+    q = queue.Queue()
+    for i in range(ff.WRITER_BATCH_SIZE + 250):
+        q.put(("insert", Path("f%d.txt" % i), None))
+
+    batch = ff.FileCommander._collect_batch(q)
+
+    assert len(batch) == ff.WRITER_BATCH_SIZE, "batch did not fill from a full queue"
+    assert q.qsize() == 250, "the rest must stay queued for the next batch"
+
+
+def test_a_lone_change_does_not_wait_for_a_batch_to_fill():
+    """One file changing must apply at once, not sit waiting for 499 friends.
+
+    The batch only grows while events are already waiting, so the common case
+    of a single edit keeps the latency it had before batching.
+    """
+    import queue
+    import time
+
+    ff = _load_ff()
+    q = queue.Queue()
+    q.put(("insert", Path("only.txt"), None))
+
+    started = time.perf_counter()
+    batch = ff.FileCommander._collect_batch(q)
+    elapsed = time.perf_counter() - started
+
+    assert len(batch) == 1
+    assert elapsed < 0.5, "collecting a lone event blocked for %.2fs" % elapsed
+
+    # An empty queue returns nothing rather than blocking forever, so the loop
+    # keeps getting the chance to notice its stop event.
+    started = time.perf_counter()
+    assert ff.FileCommander._collect_batch(queue.Queue()) == []
+    waited = time.perf_counter() - started
+    assert waited < ff.WRITER_POLL_SECONDS + 1.0
+
+
+def test_one_bad_event_does_not_lose_the_rest_of_its_batch(tmp_path):
+    """A malformed event must cost its own row, not the whole commit.
+
+    With one commit covering many events, a naive implementation would let a
+    single bad event abandon every good event batched alongside it.
+    """
+    import queue
+    import threading
+    import time
+
+    ff = _load_ff()
+    original = _allow_tmp_path(ff)
+    index = ff.FileSearchIndex()
+    events = queue.Queue()
+    stop = threading.Event()
+
+    worker = threading.Thread(
+        target=ff.FileCommander._writer_loop,
+        args=(index, tmp_path / "batch.db", events, stop),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        before = tmp_path / "before_the_bad_one.txt"
+        after = tmp_path / "after_the_bad_one.txt"
+        before.touch()
+        after.touch()
+
+        # All three land in the same batch
+        events.put(("insert", before, None))
+        events.put(("insert", None, None))       # raises inside _apply_event
+        events.put(("insert", after, None))
+
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if index.search("before", 5) and index.search("after", 5):
+                break
+            time.sleep(0.02)
+
+        assert before in index.search("before", 5), "event before the bad one was lost"
+        assert after in index.search("after", 5), "event after the bad one was lost"
+        assert worker.is_alive(), "a bad event killed the writer"
+    finally:
+        stop.set()
+        worker.join(timeout=3)
+        ff.SKIP_DIRECTORIES.clear()
+        ff.SKIP_DIRECTORIES.update(original)
+
+
+def test_batched_writes_reach_sqlite(tmp_path):
+    """Batching must not lose rows: what is applied has to be committed."""
+    import queue
+    import sqlite3
+    import threading
+    import time
+
+    ff = _load_ff()
+    original = _allow_tmp_path(ff)
+    db = tmp_path / "persist.db"
+
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE files (path TEXT PRIMARY KEY, name TEXT, is_dir INTEGER)")
+    conn.commit()
+    conn.close()
+
+    index = ff.FileSearchIndex()
+    events = queue.Queue()
+    stop = threading.Event()
+    worker = threading.Thread(
+        target=ff.FileCommander._writer_loop,
+        args=(index, db, events, stop), daemon=True,
+    )
+    worker.start()
+    try:
+        count = ff.WRITER_BATCH_SIZE + 20     # forces more than one batch
+        for i in range(count):
+            target = tmp_path / ("row_%04d.txt" % i)
+            target.touch()
+            events.put(("insert", target, None))
+
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if events.empty() and len(index.indexed_paths) >= count:
+                break
+            time.sleep(0.05)
+        time.sleep(1.5)                       # let the final commit land
+
+        check = sqlite3.connect(db)
+        rows = check.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        check.close()
+
+        assert len(index.indexed_paths) == count, "not every event was applied"
+        assert rows == count, "batched commits lost rows: %d of %d" % (rows, count)
+    finally:
+        stop.set()
+        worker.join(timeout=3)
+        ff.SKIP_DIRECTORIES.clear()
+        ff.SKIP_DIRECTORIES.update(original)

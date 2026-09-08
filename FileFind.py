@@ -89,6 +89,14 @@ ACCESS_SCORE_MAX = 40     # Cap so a heavily-used file doesn't bury everything e
 FUZZY_SCORE_CUTOFF = 75   # Minimum rapidfuzz WRatio score to accept a fuzzy match (0–100)
 FUZZY_MIN_RESULTS = 5     # Only run fuzzy pass when strategies 1–4 return fewer than this
 
+# Live update writer. Filesystem events are applied in batches under one commit,
+# because a commit per event capped the writer near 1,000 events a second:
+# extracting an archive or switching a branch left the index stale for seconds
+# while the queue drained. The batch only fills when events are already waiting,
+# so a single file change is still applied at once.
+WRITER_BATCH_SIZE = 500      # Events applied per commit at most
+WRITER_POLL_SECONDS = 1.0    # How long an idle writer waits before re-checking stop
+
 
 
 # UTILITY CLASSES - Reusable components for common operations
@@ -712,6 +720,84 @@ class FileCommander:
             self._writer_thread.join(timeout=3)
 
     @staticmethod
+    def _collect_batch(event_queue: queue.Queue) -> list:
+        """Take one event, then everything already waiting behind it.
+
+        Returns as soon as the queue runs dry, so a single file change is still
+        applied immediately. Under a burst the queue is never dry and this fills
+        to WRITER_BATCH_SIZE, which is what makes one commit cover many events.
+        """
+        try:
+            batch = [event_queue.get(timeout=WRITER_POLL_SECONDS)]
+        except queue.Empty:
+            return []
+
+        while len(batch) < WRITER_BATCH_SIZE:
+            try:
+                batch.append(event_queue.get_nowait())
+            except queue.Empty:
+                break
+        return batch
+
+    @staticmethod
+    def _apply_event(search_index: FileSearchIndex, conn, op, src, dest):
+        """Apply one filesystem event to the index and the open transaction.
+
+        Deliberately does not commit: the caller commits once per batch.
+        """
+        if op == "insert":
+            if not PathUtils.should_skip_directory(src) and src.exists():
+                search_index.add_file(src)
+                conn.execute(
+                    "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
+                    (str(src), src.name, int(src.is_dir())),
+                )
+
+        elif op == "delete":
+            search_index.remove_file(src)
+            conn.execute(
+                "DELETE FROM files WHERE LOWER(path) = ?",
+                (str(src).lower(),),
+            )
+
+        elif op == "move":
+            if dest is not None and dest.is_dir():
+                # Directory move: remove all stale entries, re-index destination
+                src_prefix = str(src).lower() + os.sep.lower()
+                stale = [
+                    p for p in list(search_index.indexed_paths)
+                    if p.startswith(src_prefix) or p == str(src).lower()
+                ]
+                for stale_lower in stale:
+                    search_index.remove_file(Path(stale_lower))
+                    conn.execute(
+                        "DELETE FROM files WHERE LOWER(path) = ?",
+                        (stale_lower,),
+                    )
+                if dest.exists():
+                    search_index.index_folder(dest)
+                    for meta_list in search_index.exact_match.values():
+                        for meta in meta_list:
+                            if str(meta.path).lower().startswith(str(dest).lower()):
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
+                                    (str(meta.path), meta.name, int(meta.is_dir)),
+                                )
+            else:
+                # File move: swap old path for new
+                search_index.remove_file(src)
+                conn.execute(
+                    "DELETE FROM files WHERE LOWER(path) = ?",
+                    (str(src).lower(),),
+                )
+                if dest is not None and dest.exists():
+                    search_index.add_file(dest)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
+                        (str(dest), dest.name, int(dest.is_dir())),
+                    )
+
+    @staticmethod
     def _writer_loop(
         search_index: FileSearchIndex,
         db_path: Path,
@@ -719,7 +805,15 @@ class FileCommander:
         stop_event: threading.Event,
     ):
         """Drain the event queue and apply delta adds/removes to index + SQLite.
-        This loop must never crash — all exceptions are swallowed per-event."""
+
+        Events are applied in batches under a single commit. Committing per
+        event held the writer to about 1,000 events a second, so a burst of
+        15,000 files backed the queue up 8,700 deep and left the index stale for
+        ten seconds while it caught up.
+
+        This loop must never crash: one bad event is skipped, and a failed
+        commit costs the cache a batch rather than the thread.
+        """
         try:
             conn = sqlite3.connect(db_path)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -730,71 +824,23 @@ class FileCommander:
             return
 
         while not stop_event.is_set():
-            try:
-                op, src, dest = event_queue.get(timeout=1.0)
-            except queue.Empty:
+            batch = FileCommander._collect_batch(event_queue)
+            if not batch:
                 continue
 
+            for op, src, dest in batch:
+                try:
+                    FileCommander._apply_event(search_index, conn, op, src, dest)
+                except Exception:
+                    pass  # Skip this event, keep the rest of the batch
+
             try:
-                if op == "insert":
-                    if not PathUtils.should_skip_directory(src) and src.exists():
-                        search_index.add_file(src)
-                        conn.execute(
-                            "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
-                            (str(src), src.name, int(src.is_dir())),
-                        )
-                        conn.commit()
+                conn.commit()
+            except sqlite3.Error:
+                # The in-memory index is already correct; only the cache is
+                # behind, and a rebuild fixes that. Never worth dying for.
+                pass
 
-                elif op == "delete":
-                    search_index.remove_file(src)
-                    conn.execute(
-                        "DELETE FROM files WHERE LOWER(path) = ?",
-                        (str(src).lower(),),
-                    )
-                    conn.commit()
-
-                elif op == "move":
-                    if dest is not None and dest.is_dir():
-                        # Directory move: remove all stale entries, re-index destination
-                        src_prefix = str(src).lower() + os.sep.lower()
-                        stale = [
-                            p for p in list(search_index.indexed_paths)
-                            if p.startswith(src_prefix) or p == str(src).lower()
-                        ]
-                        for stale_lower in stale:
-                            search_index.remove_file(Path(stale_lower))
-                            conn.execute(
-                                "DELETE FROM files WHERE LOWER(path) = ?",
-                                (stale_lower,),
-                            )
-                        if dest.exists():
-                            search_index.index_folder(dest)
-                            for meta_list in search_index.exact_match.values():
-                                for meta in meta_list:
-                                    if str(meta.path).lower().startswith(
-                                        str(dest).lower()
-                                    ):
-                                        conn.execute(
-                                            "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
-                                            (str(meta.path), meta.name, int(meta.is_dir)),
-                                        )
-                        conn.commit()
-                    else:
-                        # File move: swap old path for new
-                        search_index.remove_file(src)
-                        conn.execute(
-                            "DELETE FROM files WHERE LOWER(path) = ?",
-                            (str(src).lower(),),
-                        )
-                        if dest is not None and dest.exists():
-                            search_index.add_file(dest)
-                            conn.execute(
-                                "INSERT OR REPLACE INTO files VALUES (?, ?, ?)",
-                                (str(dest), dest.name, int(dest.is_dir())),
-                            )
-                        conn.commit()
-
-            except Exception:
-                pass  # Writer loop must never crash; stale entries filtered in search()
+        conn.close()
 
         conn.close()
